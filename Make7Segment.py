@@ -80,10 +80,12 @@ def write_gcode(filename, W, H, segments, bit_dia=3.0, cut_depth=3.0, pass_depth
         f.write("M5\nG0 X0 Y0\n")
 
 
-def make_segments(W, H, t, r, gap=None, overlap=0.0):
+def make_segments(W, H, t, r, gap=None, overlap=0.0, hgap=0.0):
     # spacing: gap between segments. If gap is None use default t*0.5
     s = gap if (gap is not None) else (t * 0.5)
     ov = max(0.0, float(overlap))
+    # hgap: how much to push A down and D up (and used later to shift verticals)
+    hg = float(hgap) if (hgap is not None) else 0.0
     # extend horizontal length by overlap to close chamfer gaps
     Lh = W - 2*t + 2.0 * ov
     if Lh <= 0:
@@ -91,28 +93,47 @@ def make_segments(W, H, t, r, gap=None, overlap=0.0):
 
     # Use segment A as vertical reference and place D symmetrically.
     segments = []
-    Ay = s
-    Dy = H - s - t
+    # Keep a base A position for vertical segment reference, then move A
+    # polygon down by hgap without changing the original top-vertical start
+    base_Ay = s
+    Ay = base_Ay + 1.0 * hg
+    # base_Dy is the original top position for D (before shifting)
+    base_Dy = H - s - t
+    # move D polygon up by hg
+    Dy = base_Dy - hg
 
-    # A bottom and D top
+    # A bottom and original D top
     A_bottom = Ay + t
-    D_top = Dy
-    if D_top <= A_bottom + 0.001:
+    D_top_orig = base_Dy
+    if D_top_orig <= A_bottom + 0.001:
         raise ValueError("Not enough vertical space for middle segment; reduce stroke or margins.")
 
-    # center between A bottom and D top
-    center_mid = (A_bottom + D_top) / 2.0
+    # center between A bottom and the shifted D top (G is not moved)
+    center_mid = (A_bottom + Dy) / 2.0
     Gy = center_mid - (t / 2.0)
-    top_vert_y = A_bottom
-    bot_vert_y = Gy + t
+    # Use the middle of G as reference for hgap offsets.
+    # G_mid is the center Y of the middle segment G.
+    G_mid = Gy + (t / 2.0)
+    hg = float(hgap)
+    # Top verticals (F,B) will end at G_mid - hg; keep their start at the
+    # original A bottom (so moving A polygon down does not shorten F/B).
+    orig_A_bottom = base_Ay + t
+    top_end = G_mid - hg
+    Lv_top = top_end - orig_A_bottom
+    if Lv_top < 0:
+        Lv_top = 0.0
+    top_vert_y = orig_A_bottom
+    # Bottom verticals (E,C) will start at G_mid + hg
+    bot_vert_y = G_mid + hg
+    # compute bottom vertical length using the original D top so E/C keep length
+    Lv_bot = D_top_orig - bot_vert_y
+    if Lv_bot < 0:
+        Lv_bot = 0.0
 
     # Horizontal segment A
     segments.append({'name':'A', 'x': (W - Lh)/2.0, 'y': Ay, 'w': Lh, 'h': t, 'r': r})
 
-    # top verticals F and B start at top_vert_y and end at Gy (no overlap)
-    Lv_top = Gy - top_vert_y
-    if Lv_top < 0:
-        Lv_top = 0.0
+    # top verticals F and B already computed above (Lv_top)
     Fx = (W - Lh)/2.0 - (t/2.0)
     Bx = (W + Lh)/2.0 - (t/2.0)
     segments.append({'name':'F', 'x': Fx, 'y': top_vert_y, 'w': t, 'h': Lv_top, 'r': r})
@@ -121,10 +142,7 @@ def make_segments(W, H, t, r, gap=None, overlap=0.0):
     # middle horizontal G centered between A bottom and D top
     segments.append({'name':'G', 'x': (W - Lh)/2.0, 'y': Gy, 'w': Lh, 'h': t, 'r': r})
 
-    # bottom verticals E and C start at bot_vert_y and end at D_top (no overlap)
-    Lv_bot = D_top - bot_vert_y
-    if Lv_bot < 0:
-        Lv_bot = 0.0
+    # bottom verticals E and C already computed above (Lv_bot)
     segments.append({'name':'E', 'x': Fx, 'y': bot_vert_y, 'w': t, 'h': Lv_bot, 'r': r})
     segments.append({'name':'C', 'x': Bx, 'y': bot_vert_y, 'w': t, 'h': Lv_bot, 'r': r})
 
@@ -146,6 +164,7 @@ def parse_args():
     p.add_argument('--outprefix', type=str, default=None, help='output file prefix')
     p.add_argument('--gap', type=float, default=0.0, help='inter-segment gap in mm (overrides default t*0.5)')
     p.add_argument('--overlap', type=float, default=0.0, help='positive value to let segments overlap (mm) to close chamfer gaps')
+    p.add_argument('--hgap', type=float, default=5.0, help='vertical shift for vertical segments: move F/B down by hgap and E/C up by hgap (mm)')
     # legacy: simple --gap still supported
     return p.parse_args()
 
@@ -156,7 +175,7 @@ def main():
     W = args.width
     t = args.stroke
     r = args.radius
-    segments = make_segments(W, H, t, r, gap=args.gap, overlap=args.overlap)
+    segments = make_segments(W, H, t, r, gap=args.gap, overlap=args.overlap, hgap=args.hgap)
     # Precompute chamfered polygon for each segment (use 'r' as chamfer distance)
     for seg in segments:
         seg['poly'] = chamfer_rect_points(seg['x'], seg['y'], seg['w'], seg['h'], seg.get('r', 0))
