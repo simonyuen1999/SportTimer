@@ -144,8 +144,10 @@ def parse_args():
     p.add_argument('--stroke', type=float, default=20.0, help='segment thickness in mm')
     p.add_argument('--radius', type=float, default=10.0, help='corner radius in mm')
     p.add_argument('--bit', type=float, default=3.0, help='cutter diameter in mm')
-    p.add_argument('--depth', type=float, default=3.0, help='cut depth in mm')
-    p.add_argument('--passdepth', type=float, default=1.5, help='depth per pass in mm')
+    p.add_argument('--depth', type=float, default=None, help='cut depth in mm (overridden by --board-thickness)')
+    p.add_argument('--passdepth', type=float, default=None, help='depth per pass in mm (overridden by --board-thickness and --cutting-paths)')
+    p.add_argument('--board-thickness', type=float, default=12.0, help='total board thickness in mm (used as cut depth by default)')
+    p.add_argument('--cutting-paths', type=int, default=4, help='number of depth passes to cut through the board')
     p.add_argument('--outprefix', type=str, default=None, help='output file prefix')
     p.add_argument('--gap', type=float, default=0.0, help='inter-segment gap in mm (overrides default t*0.5)')
     p.add_argument('--overlap', type=float, default=4.0, help='positive value to let segments overlap (mm) to close chamfer gaps')
@@ -203,7 +205,29 @@ def main():
     gfn = prefix + ".gcode"
     print(f"Writing {svgfn} and {gfn} with H={H} W={W} t={t} r={r} (shapely unions)")
     write_svg(svgfn, W, H, out_segments)
-    write_gcode(gfn, W, H, out_segments, bit_dia=args.bit, cut_depth=args.depth, pass_depth=args.passdepth)
+    # Determine cut depth and per-pass depth. Prefer explicit --depth/--passdepth when provided,
+    # otherwise use --board-thickness split into --cutting-paths passes.
+    if args.depth is not None:
+        cut_depth = float(args.depth)
+    else:
+        cut_depth = float(args.board_thickness)
+    if args.passdepth is not None:
+        pass_depth = float(args.passdepth)
+        paths = max(1, int(math.ceil(cut_depth / pass_depth)))
+    else:
+        paths = max(1, int(args.cutting_paths))
+        pass_depth = float(cut_depth) / float(paths)
+
+    # Print a concise summary so the user understands the cutting passes
+    print(f"Board thickness: {cut_depth:.3f} mm")
+    print(f"Number of passes: {paths}")
+    print(f"Depth per pass: {pass_depth:.3f} mm")
+    print("Pass targets (cumulative Z):")
+    for i in range(paths):
+        cum_z = -((i + 1) * pass_depth)
+        print(f"  - Pass {i+1}: Z = {cum_z:.3f} mm")
+
+    write_gcode(gfn, W, H, out_segments, bit_dia=args.bit, cut_depth=cut_depth, pass_depth=pass_depth)
     print("Done.")
 
 if __name__ == '__main__':
