@@ -24,6 +24,9 @@ Key CLI options (both scripts)
 - `--board-width` / `--board-height` : optional demo board dimensions (drawn in SVG and appended as a demo perimeter cut in G-code)
 - `--show-board-dim` : embed board comments and use a single demo pass for G-code preview
 - `--gap` / `--overlap` / `--hgap` : geometry tuning parameters for closing seams and shifting verticals
+- `--gap` / `--overlap` / `--hgap` : geometry tuning parameters for closing seams and shifting verticals
+- `--vert-length` : adjust the *length* of vertical segments `F`, `B`, `E`, and `C` by a signed millimeter delta (default `0.0`). Negative values shorten the segments and they are re-centered; positive values lengthen them (clamped to avoid overlaps).
+- `--rotate` / `--no-rotate` : rotate generated G-code by 90° by default (`--rotate` enabled). Use `--no-rotate` to keep the non-rotated orientation.
 - `--outprefix` : specify output filename prefix (default encodes H/W and script type)
 - `--render-source` : `poly` or `rect` (default `poly`) — controls how SVG and WebP are rendered:
 	- `poly`: draw polygon vertices (matches the G-code toolpaths exactly)
@@ -46,6 +49,15 @@ Examples
 3) Force rectangle/rounded-rect preview instead of polygon-based rendering:
 ```bash
 .venv/bin/python Make7Segment.py --render-source rect
+```
+
+4) Adjust vertical length and rotation behavior (examples):
+```bash
+# shorten verticals by 1 mm and keep default rotated G-code
+.venv/bin/python Make7Segment.py --vert-length -1
+
+# increase verticals by 2 mm and disable rotation
+.venv/bin/python Make7Segment.py --vert-length 2 --no-rotate
 ```
 
 Notes & recommendations
