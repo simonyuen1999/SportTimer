@@ -25,6 +25,16 @@ except Exception:
     ImageDraw = None
     _HAS_PIL = False
 
+try:
+    from shapely.geometry import Polygon, box
+    from shapely.ops import unary_union
+    _HAS_SHAPELY = True
+except Exception:
+    Polygon = None
+    unary_union = None
+    box = None
+    _HAS_SHAPELY = False
+
 
 def fr(x):
     return f"{x:.3f}"
@@ -207,6 +217,8 @@ def parse_args():
     p.add_argument('--hgap', type=float, default=5.0, help='vertical shift for vertical segments: move F/B down by hgap and E/C up by hgap (mm)')
     # legacy: simple --gap still supported
     p.add_argument('--render-source', choices=['poly','rect'], default='poly', help='Render SVG/WEBP from chamfer polygons (poly) or from rectangular segment params (rect)')
+    p.add_argument('--use-shapely', action='store_true', default=False, help='Force use of Shapely union (requires shapely)')
+    p.add_argument('--no-shapely', action='store_true', default=False, help='Disable Shapely union even if available')
     return p.parse_args()
 
 
@@ -220,6 +232,64 @@ def main():
     # Precompute chamfered polygon for each segment (use 'r' as chamfer distance)
     for seg in segments:
         seg['poly'] = chamfer_rect_points(seg['x'], seg['y'], seg['w'], seg['h'], seg.get('r', 0))
+    # Decide whether to use Shapely union to merge segment polygons
+    if args.use_shapely and args.no_shapely:
+        print("Conflicting options: --use-shapely and --no-shapely both set; ignoring shapely flags and auto-detecting.")
+        use_shapely = _HAS_SHAPELY
+    elif args.use_shapely:
+        use_shapely = True
+    elif args.no_shapely:
+        use_shapely = False
+    else:
+        use_shapely = _HAS_SHAPELY
+
+    out_segments = None
+    if use_shapely:
+        if not _HAS_SHAPELY:
+            print("Shapely requested but not available; falling back to per-segment polygons. Install shapely to enable union.")
+            use_shapely = False
+        else:
+            # convert to shapely polygons and union
+            polys = []
+            for seg in segments:
+                p = seg.get('poly')
+                if p and len(p) >= 3:
+                    polys.append(Polygon(p))
+            merged = unary_union(polys) if polys else None
+            # Clip result to the board extents to avoid tiny expansion beyond W/H
+            if merged is not None and box is not None:
+                try:
+                    merged = merged.intersection(box(0.0, 0.0, W, H))
+                except Exception:
+                    pass
+
+            merged_polys = []
+            if merged is None:
+                merged_polys = []
+            elif merged.geom_type == 'Polygon':
+                merged_polys = [merged]
+            elif merged.geom_type == 'MultiPolygon':
+                merged_polys = list(merged.geoms)
+            else:
+                print('Unexpected result from shapely union:', getattr(merged, 'geom_type', type(merged)))
+                merged_polys = []
+
+            out_segments = []
+            for mp in merged_polys:
+                coords = list(mp.exterior.coords)
+                if len(coords) > 1 and coords[0] == coords[-1]:
+                    coords = coords[:-1]
+                out_segments.append({'poly': coords})
+
+    if out_segments is None:
+        # No shapely union used; export per-segment polygons
+        out_segments = []
+        for seg in segments:
+            p = seg.get('poly')
+            if p:
+                out_segments.append({'poly': p})
+            else:
+                out_segments.append({'x': seg['x'], 'y': seg['y'], 'w': seg['w'], 'h': seg['h'], 'r': seg.get('r', 0)})
     prefix = args.outprefix or f"Make7Segment_H{int(H)}_W{int(W)}"
     svgfn = prefix + ".svg"
     gfn = prefix + ".gcode"
@@ -274,13 +344,14 @@ def main():
         print("\nshow-board-dim enabled: using single demo pass for G-code preview")
         print("Updated Number of passes: 1")
     # Now write SVG (with optional board perimeter) and G-code
-    write_svg(svgfn, W, H, segments, margin=margin, show_board=args.show_board_dim, board_w=board_w, board_h=board_h, render_source=args.render_source)
-    write_gcode(gfn, W, H, segments, bit_dia=args.bit, cut_depth=cut_depth, pass_depth=pass_depth, show_board=args.show_board_dim, board_w=board_w, board_h=board_h, margin=margin)
+    # Write outputs using out_segments (which may be unioned polygons or per-segment polygons)
+    write_svg(svgfn, W, H, out_segments, margin=margin, show_board=args.show_board_dim, board_w=board_w, board_h=board_h, render_source=args.render_source)
+    write_gcode(gfn, W, H, out_segments, bit_dia=args.bit, cut_depth=cut_depth, pass_depth=pass_depth, show_board=args.show_board_dim, board_w=board_w, board_h=board_h, margin=margin)
     # Optionally write a raster preview using Pillow
     if _HAS_PIL:
         imgfn = prefix + ".webp"
         try:
-            write_image(imgfn, W, H, segments, margin=margin, render_source=args.render_source)
+            write_image(imgfn, W, H, out_segments, margin=margin, render_source=args.render_source)
             print(f"Wrote image: {imgfn}")
         except Exception as e:
             print("Image export failed:", e)
