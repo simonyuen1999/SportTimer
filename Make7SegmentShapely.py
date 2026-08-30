@@ -22,6 +22,14 @@ except Exception:
     unary_union = None
     box = None
 
+try:
+    from PIL import Image, ImageDraw
+    _HAS_PIL = True
+except Exception:
+    Image = None
+    ImageDraw = None
+    _HAS_PIL = False
+
 
 def fr(x):
     return f"{x:.3f}"
@@ -31,7 +39,7 @@ def rect_svg(x, y, w, h, rx, fill="none", stroke="#000", stroke_width=1):
     return f'<rect x="{fr(x)}" y="{fr(y)}" width="{fr(w)}" height="{fr(h)}" rx="{fr(rx)}" fill="{fill}" stroke="{stroke}" stroke-width="{fr(stroke_width)}" />\n'
 
 
-def write_svg(filename, W, H, segments, margin=10, show_board=False, board_w=None, board_h=None):
+def write_svg(filename, W, H, segments, margin=10, show_board=False, board_w=None, board_h=None, render_source='poly'):
     vw = W + 2 * margin
     vh = H + 2 * margin
     with open(filename, "w") as f:
@@ -47,7 +55,7 @@ def write_svg(filename, W, H, segments, margin=10, show_board=False, board_w=Non
 
         for seg in segments:
             poly = seg.get('poly')
-            if poly:
+            if render_source == 'poly' and poly:
                 pts = " ".join([f"{fr(x)},{fr(y)}" for (x, y) in poly])
                 f.write(f'<polygon points="{escape(pts)}" fill="#111" stroke="#000" stroke-width="0.5" />\n')
             else:
@@ -117,6 +125,44 @@ def chamfer_rect_points(x, y, w, h, c):
     return pts
 
 
+def rounded_rect_points(x, y, w, h, r, steps_per_corner=6):
+    # Deprecated: replaced by chamfered polygon generator
+    if r <= 0:
+        return [(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
+    return chamfer_rect_points(x, y, w, h, r)
+
+
+def write_image(filename, W, H, segments, margin=10, scale=8, bg=(255,255,255), segcolor=(0,0,0), render_source='poly'):
+    if not _HAS_PIL:
+        raise RuntimeError('Pillow not available; install with pip install pillow to generate webp image')
+    px_w = int((W + 2*margin) * scale)
+    px_h = int((H + 2*margin) * scale)
+    img = Image.new('RGB', (px_w, px_h), color=bg)
+    draw = ImageDraw.Draw(img)
+    # draw border
+    border_rect = [margin*scale, margin*scale, (margin+W)*scale, (margin+H)*scale]
+    draw.rectangle(border_rect, outline=(0,0,0), width=max(2, int(scale/2)))
+    for seg in segments:
+        poly = seg.get('poly')
+        if render_source == 'poly' and poly:
+            pts_scaled = [((margin + x) * scale, (margin + y) * scale) for (x, y) in poly]
+            draw.polygon(pts_scaled, fill=segcolor)
+        else:
+            x = (margin + seg['x']) * scale
+            y = (margin + seg['y']) * scale
+            w = seg['w'] * scale
+            h = seg['h'] * scale
+            r = seg.get('r', 0) * scale
+            box_coords = [x, y, x + w, y + h]
+            try:
+                draw.rounded_rectangle(box_coords, radius=max(0, int(r)), fill=segcolor)
+            except Exception:
+                pts = rounded_rect_points(seg['x'] + margin, seg['y'] + margin, seg['w'], seg['h'], seg.get('r', 0), steps_per_corner=6)
+                pts = [(px*scale, py*scale) for (px, py) in pts]
+                draw.polygon(pts, fill=segcolor)
+    img.save(filename, format='WEBP')
+
+
 def make_segments(W, H, t, r, gap=None, overlap=0.0, hgap=0.0):
     s = gap if (gap is not None) else (t * 0.5)
     ov = max(0.0, float(overlap))
@@ -179,6 +225,7 @@ def parse_args():
     p.add_argument('--gap', type=float, default=0.0, help='inter-segment gap in mm (overrides default t*0.5)')
     p.add_argument('--overlap', type=float, default=4.0, help='positive value to let segments overlap (mm) to close chamfer gaps')
     p.add_argument('--hgap', type=float, default=5.0, help='vertical shift for vertical segments: move A/D and verticals relative to G (mm)')
+    p.add_argument('--render-source', choices=['poly','rect'], default='poly', help='Render SVG/WEBP from chamfer polygons (poly) or from rectangular segment params (rect)')
     return p.parse_args()
 
 
@@ -284,8 +331,17 @@ def main():
         print("\nshow-board-dim enabled: using single demo pass for G-code preview")
         print("Updated Number of passes: 1")
     # Now write SVG (with optional board perimeter) and G-code
-    write_svg(svgfn, W, H, out_segments, margin=margin, show_board=args.show_board_dim, board_w=board_w, board_h=board_h)
+    write_svg(svgfn, W, H, out_segments, margin=margin, show_board=args.show_board_dim, board_w=board_w, board_h=board_h, render_source=args.render_source)
     write_gcode(gfn, W, H, out_segments, bit_dia=args.bit, cut_depth=cut_depth, pass_depth=pass_depth, show_board=args.show_board_dim, board_w=board_w, board_h=board_h, margin=margin)
+    # Optionally write a raster preview using Pillow
+    if _HAS_PIL:
+        imgfn = prefix + ".webp"
+        try:
+            write_image(imgfn, W, H, out_segments, margin=margin, render_source=args.render_source)
+            print(f"Wrote image: {imgfn}")
+        except Exception as e:
+            print("Image export failed:", e)
+
     print("Done.")
 
 if __name__ == '__main__':
