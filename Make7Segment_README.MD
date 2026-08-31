@@ -20,6 +20,13 @@ What changed recently
 - `--vert-length` is interpreted as an additive delta to the vertical rectangle heights (keeps centerlines fixed). Positive values increase vertical segment length; negative values shorten them. Clamping is controlled by `--allow-vertical-overlap` (default: enabled).
 - Added `--allow-vertical-overlap` / `--no-allow-vertical-overlap` to control whether verticals are allowed to grow beyond their available gaps. Default is `--allow-vertical-overlap` (enabled).
 - `--hort-length` now validates values and will raise a clear ValueError if set to `<= 0.0`.
+ - `--show-board-dim` no longer modifies the SVG or WebP outputs. When enabled it alters only G-code generation: the script emits a single shallow reference layer (one pass) and writes the board perimeter plus a digit bounding box and simple width/height indicator lines in the G-code preview.
+ - G-code comments (parenthesized `(...)`) are suppressed by default to improve compatibility with GRBL/Candle. Pass `--debug-gcode` to re-enable informative parenthesis comments for debugging.
+ - `--pause-after-seg` implements an operator-friendly per-segment pause workflow (default: off). When enabled, each segment cycle does: start spindle (`M3 S...`), rapid to start, plunge, cut polygon, retract, stop spindle (`M5`), then `M0` (program pause) so the operator can inspect or change tooling before resuming.
+   - If your controller doesn't support `M0`, consider `--debug-gcode` to inspect emitted control flow and request an alternative pause method (`M1` or feed-hold/`!` + resume `~`).
+ - `--vert-length` is interpreted as an additive delta to the vertical rectangle heights (keeps centerlines fixed). Positive values increase vertical segment length; negative values shorten them. Clamping is controlled by `--allow-vertical-overlap` (default: enabled).
+ - Added `--allow-vertical-overlap` / `--no-allow-vertical-overlap` to control whether verticals are allowed to grow beyond their available gaps. Default is `--allow-vertical-overlap` (enabled).
+ - `--hort-length` now validates values and will raise a clear ValueError if set to `<= 0.0`.
 
 Key CLI options (concise)
 - `--height` / `--width` : digit size in mm (defaults: `120.0`, `80.0`)
@@ -29,6 +36,9 @@ Key CLI options (concise)
 - `--depth` / `--passdepth` / `--board-thickness` / `--cutting-paths` : control cut depth and pass splitting; when `--depth` omitted `--board-thickness` is used as depth.
 - `--board-width` / `--board-height` : optional demo board size (defaults: `100.0 x 172.0` mm)
 - `--show-board-dim` : emit board/digit reference geometry in the generated G-code and use a single shallow demo pass (does not change SVG/WebP)
+ - `--show-board-dim` : emit board/digit reference geometry in the generated G-code and use a single shallow demo pass (does not change SVG/WebP)
+ - `--pause-after-seg` : pause the program after each segment (start spindle, cut segment, stop spindle, `M0` pause). Use this to perform per-segment inspections or tool changes.
+ - `--debug-gcode` : when set, the generator will include parenthesized comment lines and extra debug comments in the G-code. Defaults to off (comments suppressed).
 - `--gap` / `--overlap` / `--hgap` : geometry tuning for closing seams and shifting verticals
 - `--vert-length` : signed delta applied to vertical segment heights (keeps centers fixed)
 - `--allow-vertical-overlap` / `--no-allow-vertical-overlap` : allow or clamp vertical growth (default: allow)
@@ -48,6 +58,17 @@ Notes
 - The G-code output is the authoritative toolpath. Use `--render-source poly` to make SVG/WebP match the G-code polygons exactly.
 - When `--show-board-dim` is enabled the G-code includes both the board perimeter (default 100×172 mm) and the digit bounding box (default 80×120 mm) plus simple dimension indicator lines and comments so the spatial relationship is clear in the preview G-code.
 - The script auto-detects Shapely; use `--use-shapely`/`--no-shapely` to override.
+ - The G-code output is the authoritative toolpath. Use `--render-source poly` to make SVG/WebP match the G-code polygons exactly.
+ - By default the generated G-code intentionally omits parenthesized comments to improve compatibility with some controllers and sender software (Candle/GRBL). Use `--debug-gcode` to re-enable comments for inspection.
+ - The `--pause-after-seg` workflow emits `M3`/`M5` around each segment and uses `M0` to pause. In Candle you can resume a paused GRBL job using the GUI Play button or by sending the cycle-start command `~` to the controller console. If your controller does not accept `M0`, consider switching to `M1`, or using feed-hold (`!`) + cycle-start (`~`) — open an issue or request and I can change the pause strategy.
+ - The `--pause-after-seg` workflow emits `M3`/`M5` around each segment and uses `M0` to pause. In Windows Candle, use the Hold button (or Play) to continue the cutting process. The cycle-start command `~` also resumes a paused job, but Candle's console may not be enabled for direct input by default. If your controller does not accept `M0`, consider switching to `M1`, or using feed-hold (`!`) + cycle-start (`~`). If you'd like a different pause method, ask and I can update the generator to emit your preferred sequence.
+
+**Pause Method Details**
+- `M0` (Program Pause): stops program execution at that line and waits for user resume (GUI Play or cycle-start `~`). Widely supported by senders and the current method used by `--pause-after-seg`.
+- `M1` (Optional Stop): behaves like `M0` but is only honored when the sender/controller's "optional stop" feature is enabled. If optional-stop is disabled, `M1` is ignored.
+- Feed-hold / cycle-start (`!` and `~`): real-time sender commands. `!` issues an immediate feed-hold (pause), and `~` resumes. These are not typically embedded for automated pauses because they rely on the sender to send real-time commands rather than being part of the program file.
+
+- Recommendation: keep the default `M0`-based pause for embedded per-segment pauses because it works across most senders (Candle included). If you want configurable behavior, I can add a `--pause-method` option with values like `m0`, `m1`, or `feed-hold` so you can select your preferred pause strategy without editing the script.
 
 Examples
 ```bash
@@ -62,6 +83,15 @@ python Make7Segment.py --render-source rect
 
 # adjust verticals and disable rotation
 python Make7Segment.py --vert-length 2 --no-rotate
+
+# New examples
+```bash
+# per-segment pause (start/stop per segment + operator `M0` pause)
+python Make7Segment.py --pause-after-seg --show-board-dim
+
+# enable readable G-code comments for debugging
+python Make7Segment.py --pause-after-seg --show-board-dim --debug-gcode
+```
 ```
 
 Recommended gitignore
