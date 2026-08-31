@@ -69,3 +69,30 @@ Notes & recommendations
 If you want, I can:
 - Add a `requirements.txt` listing `pillow` and `shapely` (optional), or
 - Make a single unified script that auto-detects Shapely and exposes `--use-shapely` behavior. Which would you prefer?
+
+Shapely vs No-Shapely (what changes and why)
+- `--use-shapely` enabled (or auto-detected when Shapely is installed): the script builds chamfered polygons for each segment and runs a boolean `unary_union` over them. The unioned geometry is then clipped to the board box and used as the authoritative outline for SVG, WebP and G-code. This removes seams and produces a single (or few) continuous outer contour(s) for cutting.
+- `--no-shapely` (or when Shapely is not present): the script emits per-segment polygons (one polygon per A..G segment). The SVG/WebP/G-code reflect each segment individually — this can show tiny chamfer gaps or overlapping edges at segment joins.
+- Practical effects:
+	- Visuals: `use-shapely` usually looks cleaner (no diagonal gaps); `no-shapely` may show seams.
+	- G-code: `use-shapely` produces simpler outer contours; `no-shapely` may produce multiple adjacent contours (which can cause overlapping cuts).
+	- Precision: boolean union may slightly alter vertex positions (we clip to the board box to avoid tiny outward expansions). For very tight mechanical fits, inspect the resulting G-code.
+
+New / updated CLI options
+- `--use-shapely` : force the boolean union step (requires `shapely`) and use unioned polygons for outputs.
+- `--no-shapely` : disable boolean union and emit per-segment polygons.
+- `--render-source` : `poly` (default) or `rect`. `poly` draws polygons (matches the G-code toolpaths); `rect` draws per-segment rounded rectangles for reference visuals.
+
+Default behavior
+- If you omit both `--use-shapely` and `--no-shapely` the script auto-detects Shapely in the running Python interpreter and uses it when available. This means in your `.venv` (if Shapely installed) the script will use union by default; in a bare `python3` it will fall back to per-segment mode.
+
+Quick compare commands
+```bash
+# force per-segment (no union)
+.venv/bin/python Make7Segment.py --use-shapely # force union (if available)
+.venv/bin/python Make7Segment.py --no-shapely   # force per-segment polygons
+
+# explicitly match visuals to G-code
+.venv/bin/python Make7Segment.py --render-source poly --use-shapely
+.venv/bin/python Make7Segment.py --render-source poly --no-shapely
+```
