@@ -1,9 +1,8 @@
 # Make7Segment — Usage & Current Python Specification
 
-This repository contains two related scripts to generate a single 7-segment digit preview and simple CNC outline toolpaths:
+This repository contains a single utility script to generate a 7-segment digit preview and simple CNC outline toolpaths:
 
-- `Make7Segment.py` — canonical generator (per-segment chamfer polygons, SVG, G-code, optional WebP preview).
-- `Make7SegmentShapely.py` — same outputs but performs a Shapely `unary_union` on segment polygons to remove seams deterministically (requires `shapely`).
+- `Make7Segment.py` — canonical generator. It builds chamfered per-segment polygons, optionally performs a Shapely boolean union to merge seams (if `shapely` is installed or when `--use-shapely` is passed), and writes SVG, G-code, and optional WebP previews.
 
 Outputs produced (per run):
 - `<prefix>.svg` — vector preview (mm units)
@@ -13,10 +12,10 @@ Outputs produced (per run):
 Dependencies
 - Python 3
 - Optional but recommended in a virtualenv: `pillow` (`pip install pillow`) for WebP export.
-- Optional for unioned geometry: `shapely` (`pip install shapely`) — used by `Make7SegmentShapely.py`.
+- Optional for boolean union: `shapely` (`pip install shapely`). When present `Make7Segment.py` can run the union pipeline; when absent the script emits per-segment polygons.
 
-Key CLI options (both scripts)
-- `--height` / `--width` : digit size in mm (defaults: 200, 110/120)
+Key CLI options
+- `--height` / `--width` : digit size in mm (defaults: 200, 95)
 - `--stroke` : segment thickness in mm
 - `--radius` : chamfer radius (used to compute chamfer polygon)
 - `--bit` : cutter diameter for G-code comments (does not alter geometry)
@@ -24,13 +23,17 @@ Key CLI options (both scripts)
 - `--board-width` / `--board-height` : optional demo board dimensions (drawn in SVG and appended as a demo perimeter cut in G-code)
 - `--show-board-dim` : embed board comments and use a single demo pass for G-code preview
 - `--gap` / `--overlap` / `--hgap` : geometry tuning parameters for closing seams and shifting verticals
-- `--gap` / `--overlap` / `--hgap` : geometry tuning parameters for closing seams and shifting verticals
-- `--vert-length` : adjust the *length* of vertical segments `F`, `B`, `E`, and `C` by a signed millimeter delta (default `0.0`). Negative values shorten the segments and they are re-centered; positive values lengthen them (clamped to avoid overlaps).
-- `--rotate` / `--no-rotate` : rotate generated G-code by 90° by default (`--rotate` enabled). Use `--no-rotate` to keep the non-rotated orientation.
-- `--outprefix` : specify output filename prefix (default encodes H/W and script type)
+- `--vert-length` : adjust the length (mm) of vertical segments `F`,`B`,`E`,`C` by a signed delta (default `-10.0` in the script). Negative values shorten verticals; positive values lengthen them. The implementation recenters segments and clamps lengths to avoid overlaps.
+- `--rotate` / `--no-rotate` : control a 90° rotation applied to output coordinates used for G-code (default: rotated). Use `--no-rotate` to keep the original orientation.
+- `--spindle-speed` : if set, emits `M3 S<value>` at the start of the G-code (script default is `1000`).
+- `--outprefix` : specify output filename prefix (default encodes H/W)
 - `--render-source` : `poly` or `rect` (default `poly`) — controls how SVG and WebP are rendered:
 	- `poly`: draw polygon vertices (matches the G-code toolpaths exactly)
 	- `rect`: draw each segment as a rounded rectangle using the segment parameters
+  
+Additional shapely flags
+- `--use-shapely` : force the boolean union step (requires `shapely`).
+- `--no-shapely` : disable boolean union and emit per-segment polygons.
 
 Rendering note
 - The G-code is the authoritative output for CNC. To ensure the SVG and raster previews visually match the actual toolpaths, use `--render-source poly`. That causes both SVG and WebP to be drawn from the same polygon coordinates used to generate G-code toolpaths.
@@ -41,9 +44,13 @@ Examples
 .venv/bin/python Make7Segment.py --height 200 --width 120 --board-width 150 --show-board-dim --render-source poly
 ```
 
-2) Shapely union variant (requires shapely installed):
+2) Force union or per-segment behavior:
 ```bash
-.venv/bin/python Make7SegmentShapely.py --height 200 --width 110 --board-width 130 --show-board-dim --render-source poly
+# force union (if shapely installed)
+.venv/bin/python Make7Segment.py --use-shapely --render-source poly
+
+# force per-segment (no union)
+.venv/bin/python Make7Segment.py --no-shapely --render-source poly
 ```
 
 3) Force rectangle/rounded-rect preview instead of polygon-based rendering:
