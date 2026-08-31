@@ -66,9 +66,19 @@ def write_gcode(filename, W, H, segments, bit_dia=3.0, cut_depth=3.0, pass_depth
         if spindle_speed is not None:
             f.write(f"M3 S{int(spindle_speed)}\n")
         f.write(f"F{feed}\n")
-        depth = cut_depth
-        passes = max(1, int(math.ceil(depth / pass_depth)))
-        pass_step = depth / passes
+        # Determine cutting depth and pass plan. When showing board dims we
+        # only generate a single shallow reference layer (demo) instead of
+        # the full-depth multi-pass cut.
+        if show_board and (board_w is not None) and (board_h is not None):
+            # demo depth: shallow mark for reference (<= 0.5 mm and <= cut_depth)
+            demo_depth = min(0.5, max(0.0, float(cut_depth)))
+            depth = demo_depth
+            passes = 1
+            pass_step = depth
+        else:
+            depth = cut_depth
+            passes = max(1, int(math.ceil(depth / pass_depth)))
+            pass_step = depth / passes
         if rotate:
             def _tx(x, y):
                 return (H - y, x)
@@ -102,6 +112,7 @@ def write_gcode(filename, W, H, segments, bit_dia=3.0, cut_depth=3.0, pass_depth
                 f.write(f"G0 Z{fr(safe_z)}\n")
                 sx, sy = tx_poly[start_idx]
                 f.write(f"G0 X{fr(sx)} Y{fr(sy)}\n")
+                # plunge only to the demo/shallow depth when in show_board mode
                 f.write(f"G1 Z{fr(cur_depth)} F{plunge}\n")
                 n = len(tx_poly)
                 for j in range(1, n+1):
@@ -109,20 +120,59 @@ def write_gcode(filename, W, H, segments, bit_dia=3.0, cut_depth=3.0, pass_depth
                     f.write(f"G1 X{fr(rx)} Y{fr(ry)} F{feed}\n")
                 f.write(f"G0 Z{fr(safe_z)}\n")
         ox, oy = desired_start
-        f.write(f"M5\nG0 X{fr(ox)} Y{fr(oy)}\n")
         if show_board and (board_w is not None) and (board_h is not None):
             off_x = -((board_w - W) / 2.0)
             off_y = -((board_h - H) / 2.0)
             bp = [(off_x, off_y), (off_x + board_w, off_y), (off_x + board_w, off_y + board_h), (off_x, off_y + board_h)]
-            f.write(f"(Board perimeter demo cut)\n")
+            f.write(f"(Board perimeter - single reference layer)\n")
+            f.write(f"(Board size: {board_w:.3f} mm x {board_h:.3f} mm)\n")
+            # draw perimeter at shallow demo depth (one pass)
+            demo_depth = pass_step if passes == 1 else min(0.5, float(cut_depth))
+            f.write(f"G0 Z{fr(safe_z)}\n")
+            # also draw the digit bounding box (W x H) so relationship is visible
+            dbp = [(0.0, 0.0), (W, 0.0), (W, H), (0.0, H)]
+            f.write(f"(Digit bounding box - {W:.3f} x {H:.3f} mm)\n")
+            f.write(f"G0 Z{fr(safe_z)}\n")
+            dx0, dy0 = _tx(dbp[0][0], dbp[0][1])
+            f.write(f"G0 X{fr(dx0)} Y{fr(dy0)}\n")
+            f.write(f"G1 Z{fr(-min(0.5, demo_depth))} F{plunge}\n")
+            for (cx, cy) in dbp[1:]+[dbp[0]]:
+                rx, ry = _tx(cx, cy)
+                f.write(f"G1 X{fr(rx)} Y{fr(ry)} F{feed}\n")
             f.write(f"G0 Z{fr(safe_z)}\n")
             bx0, by0 = _tx(bp[0][0], bp[0][1])
             f.write(f"G0 X{fr(bx0)} Y{fr(by0)}\n")
-            f.write(f"G1 Z{fr(-depth)} F{plunge}\n")
+            f.write(f"G1 Z{fr(-demo_depth)} F{plunge}\n")
             for (cx, cy) in bp[1:]+[bp[0]]:
                 rx, ry = _tx(cx, cy)
                 f.write(f"G1 X{fr(rx)} Y{fr(ry)} F{feed}\n")
             f.write(f"G0 Z{fr(safe_z)}\n")
+
+            # draw simple dimension indicator lines for width and height
+            # horizontal width line (above top edge)
+            dim_gap = max(2.0, float(margin) * 0.2)
+            wx1, wy = bp[0][0], bp[0][1] - dim_gap
+            wx2 = bp[1][0]
+            sx, sy = _tx(wx1, wy)
+            ex, ey = _tx(wx2, wy)
+            f.write(f"(Board width indicator W={board_w:.3f} mm)\n")
+            f.write(f"G0 Z{fr(safe_z)}\nG0 X{fr(sx)} Y{fr(sy)}\n")
+            f.write(f"G1 Z{fr(-min(0.3, demo_depth))} F{plunge}\n")
+            f.write(f"G1 X{fr(ex)} Y{fr(ey)} F{feed}\n")
+            f.write(f"G0 Z{fr(safe_z)}\n")
+
+            # vertical height line (to the right of board)
+            hx, hy1 = bp[1][0] + dim_gap, bp[1][1]
+            hy2 = bp[2][1]
+            sx, sy = _tx(hx, hy1)
+            ex, ey = _tx(hx, hy2)
+            f.write(f"(Board height indicator H={board_h:.3f} mm)\n")
+            f.write(f"G0 Z{fr(safe_z)}\nG0 X{fr(sx)} Y{fr(sy)}\n")
+            f.write(f"G1 Z{fr(-min(0.3, demo_depth))} F{plunge}\n")
+            f.write(f"G1 X{fr(ex)} Y{fr(ey)} F{feed}\n")
+            f.write(f"G0 Z{fr(safe_z)}\n")
+        # stop spindle and return to home
+        f.write("M5\n")
         f.write(f"G0 Z{fr(safe_z)}\n")
         f.write("(Returning to machine HOME X0 Y0)\n")
         f.write("G0 X0 Y0\n")
@@ -148,7 +198,7 @@ def chamfer_rect_points(x, y, w, h, c):
     return pts
 
 
-def make_segments(W, H, t, r, gap=None, overlap=0.0, hgap=0.0, vert_length=0.0, hort_length=None):
+def make_segments(W, H, t, r, gap=None, overlap=0.0, hgap=0.0, vert_length=0.0, hort_length=None, allow_vertical_overlap=True):
     s = gap if (gap is not None) else (t * 0.5)
     ov = max(0.0, float(overlap))
     hg = float(hgap) if (hgap is not None) else 0.0
@@ -191,7 +241,7 @@ def make_segments(W, H, t, r, gap=None, overlap=0.0, hgap=0.0, vert_length=0.0, 
     available_top = G_top - A_bottom
     # keep original/default vertical length unless it doesn't fit
     Lv_top = default_vert_len
-    if Lv_top > available_top:
+    if (not allow_vertical_overlap) and (Lv_top > available_top):
         Lv_top = max(0.0, available_top)
     top_mid = A_bottom + (available_top / 2.0) if available_top > 0.0 else A_bottom
     top_vert_y = top_mid - (Lv_top / 2.0)
@@ -200,7 +250,7 @@ def make_segments(W, H, t, r, gap=None, overlap=0.0, hgap=0.0, vert_length=0.0, 
     # Bottom vertical segments (E/C) should be centered between G_bottom and D_top
     available_bot = D_top - G_bottom
     Lv_bot = default_vert_len
-    if Lv_bot > available_bot:
+    if (not allow_vertical_overlap) and (Lv_bot > available_bot):
         Lv_bot = max(0.0, available_bot)
     bot_mid = G_bottom + (available_bot / 2.0) if available_bot > 0.0 else G_bottom
     bot_vert_y = bot_mid - (Lv_bot / 2.0)
@@ -221,12 +271,13 @@ def make_segments(W, H, t, r, gap=None, overlap=0.0, hgap=0.0, vert_length=0.0, 
             Lv_top_new = 0.0
         if Lv_bot_new < 0.0:
             Lv_bot_new = 0.0
-        max_top_len = max(0.0, available_top)
-        if Lv_top_new > max_top_len:
-            Lv_top_new = max_top_len
-        max_bot_len = max(0.0, available_bot)
-        if Lv_bot_new > max_bot_len:
-            Lv_bot_new = max_bot_len
+        if (not allow_vertical_overlap):
+            max_top_len = max(0.0, available_top)
+            if Lv_top_new > max_top_len:
+                Lv_top_new = max_top_len
+            max_bot_len = max(0.0, available_bot)
+            if Lv_bot_new > max_bot_len:
+                Lv_bot_new = max_bot_len
 
         # keep centerlines fixed: compute new top/bot y by centering new lengths
         top_vert_y = top_mid - (Lv_top_new / 2.0)
@@ -273,8 +324,11 @@ def parse_args():
     p.add_argument('--gap', type=float, default=0.0, help='inter-segment gap in mm (overrides default t*0.5)')
     p.add_argument('--overlap', type=float, default=2.0, help='positive value to let segments overlap (mm) to close chamfer gaps')
     p.add_argument('--hgap', type=float, default=1.0, help='vertical shift for vertical segments: move F/B down by hgap and E/C up by hgap (mm)')
-    p.add_argument('--vert-length', type=float, default=0.0, help='adjustment (mm) to vertical lengths of F,B,E,C; negative reduces length (e.g. -1 reduces by 1mm)')
+    p.add_argument('--vert-length', type=float, default=5.0, help='adjustment (mm) to vertical lengths of F,B,E,C; negative reduces length (e.g. -1 reduces by 1mm)')
     p.add_argument('--hort-length', type=float, default=50.0, help='override horizontal length for segments A,G,D in mm (optional)')
+    p.add_argument('--allow-vertical-overlap', dest='allow_vertical_overlap', action='store_true', help='allow vertical segments to grow beyond gaps and overlap horizontals (default: enabled)')
+    p.add_argument('--no-allow-vertical-overlap', dest='allow_vertical_overlap', action='store_false', help='disable vertical overlap; clamp vertical lengths to available gaps')
+    p.set_defaults(allow_vertical_overlap=True)
     p.add_argument('--render-source', choices=['poly','rect'], default='poly', help='Render SVG/WEBP from chamfer polygons (poly) or from rectangular segment params (rect)')
     p.add_argument('--use-shapely', action='store_true', default=False, help='Force use of Shapely union (requires shapely)')
     p.add_argument('--no-shapely', action='store_true', default=False, help='Disable Shapely union even if available')
@@ -455,7 +509,7 @@ if __name__ == '__main__':
     t = args.stroke
     r = args.radius
 
-    segments = make_segments(W, H, t, r, gap=args.gap, overlap=args.overlap, hgap=args.hgap, vert_length=args.vert_length, hort_length=args.hort_length)
+    segments = make_segments(W, H, t, r, gap=args.gap, overlap=args.overlap, hgap=args.hgap, vert_length=args.vert_length, hort_length=args.hort_length, allow_vertical_overlap=args.allow_vertical_overlap)
     for seg in segments:
         seg['poly'] = chamfer_rect_points(seg['x'], seg['y'], seg['w'], seg['h'], seg.get('r', 0))
 
