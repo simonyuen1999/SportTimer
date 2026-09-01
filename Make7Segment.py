@@ -194,6 +194,24 @@ def write_gcode(filename, W, H, segments, bit_dia=3.0, cut_depth=3.0, pass_depth
                 rx, ry = _tx(cx, cy)
                 f.write(f"G1 X{fr(rx)} Y{fr(ry)} F{feed}\n")
             f.write(f"G0 Z{fr(safe_z)}\n")
+            # draw segment outlines as single shallow pass for reference
+            for seg in segments:
+                poly = seg.get('poly')
+                if not poly:
+                    if all(k in seg for k in ('x', 'y', 'w', 'h')):
+                        poly = chamfer_rect_points(seg['x'], seg['y'], seg['w'], seg['h'], seg.get('r', 0))
+                    else:
+                        continue
+                tx_pts = [_tx(x, y) for (x, y) in poly]
+                if not tx_pts:
+                    continue
+                f.write(f"G0 Z{fr(safe_z)}\n")
+                sx, sy = tx_pts[0]
+                f.write(f"G0 X{fr(sx)} Y{fr(sy)}\n")
+                f.write(f"G1 Z{fr(-min(0.5, demo_depth))} F{plunge}\n")
+                for (px, py) in tx_pts[1:]+[tx_pts[0]]:
+                    f.write(f"G1 X{fr(px)} Y{fr(py)} F{feed}\n")
+                f.write(f"G0 Z{fr(safe_z)}\n")
             bx0, by0 = _tx(bp[0][0], bp[0][1])
             f.write(f"G0 X{fr(bx0)} Y{fr(by0)}\n")
             f.write(f"G1 Z{fr(-demo_depth)} F{plunge}\n")
