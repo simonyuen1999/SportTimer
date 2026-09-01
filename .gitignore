@@ -3,3 +3,4 @@
 *.gcode
 *.webp
 .DS_store
+.*.swp

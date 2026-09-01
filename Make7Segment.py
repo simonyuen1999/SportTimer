@@ -227,6 +227,50 @@ def write_gcode(filename, W, H, segments, bit_dia=3.0, cut_depth=3.0, pass_depth
             f.write(f"G1 Z{fr(-min(0.3, demo_depth))} F{plunge}\n")
             f.write(f"G1 X{fr(ex)} Y{fr(ey)} F{feed}\n")
             f.write(f"G0 Z{fr(safe_z)}\n")
+        else:
+            # Generate cutting paths for each segment polygon or rect when
+            # not in "show board demo" mode. This emits rapid moves to the
+            # start point, then performs the multi-pass profile cuts.
+            for seg in segments:
+                poly = seg.get('poly')
+                if not poly:
+                    # fallback to chamfered rectangle points for rect-style
+                    if all(k in seg for k in ('x', 'y', 'w', 'h')):
+                        poly = chamfer_rect_points(seg['x'], seg['y'], seg['w'], seg['h'], seg.get('r', 0))
+                    else:
+                        continue
+
+                # apply rotation transform if requested
+                tx_pts = [_tx(x, y) for (x, y) in poly]
+                if not tx_pts:
+                    continue
+
+                # optionally start spindle per-segment when pause-after-seg is used
+                if spindle_speed is not None and pause_after_segment:
+                    f.write(f"M3 S{int(spindle_speed)}\n")
+
+                # rapid to safe Z and start XY
+                f.write(f"G0 Z{fr(safe_z)}\n")
+                sx, sy = tx_pts[0]
+                f.write(f"G0 X{fr(sx)} Y{fr(sy)}\n")
+
+                # multi-pass cutting
+                for pi in range(passes):
+                    target_depth = -min((pi + 1) * pass_step, depth)
+                    f.write(f"G1 Z{fr(target_depth)} F{plunge}\n")
+                    # follow polygon perimeter
+                    for (px, py) in tx_pts[1:] + [tx_pts[0]]:
+                        f.write(f"G1 X{fr(px)} Y{fr(py)} F{feed}\n")
+                    f.write(f"G0 Z{fr(safe_z)}\n")
+
+                if pause_after_segment:
+                    # stop spindle and pause for operator intervention
+                    f.write("M5\n")
+                    f.write(f"G0 Z{fr(safe_z)}\n")
+                    f.write("M0\n")
+                    # restart spindle when resuming next segment
+                    if spindle_speed is not None:
+                        f.write(f"M3 S{int(spindle_speed)}\n")
         # stop spindle and return to home
         f.write("M5\n")
         f.write(f"G0 Z{fr(safe_z)}\n")
@@ -576,10 +620,12 @@ if __name__ == '__main__':
     cli_profile = None
     # Quick pre-scan for --profile on argv to allow defaults to be set from it
     import sys
-    for i, a in enumerate(sys.argv[1:], start=1):
-        if a == '--profile' and i < len(sys.argv):
-            cli_profile = sys.argv[i]
+    for idx, a in enumerate(sys.argv[1:], start=1):
+        # handle `--profile file.cfg` form
+        if a == '--profile' and (idx + 1) < len(sys.argv):
+            cli_profile = sys.argv[idx + 1]
             break
+        # handle `--profile=file.cfg` form
         if a.startswith('--profile='):
             cli_profile = a.split('=', 1)[1]
             break
