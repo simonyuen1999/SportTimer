@@ -6,6 +6,8 @@ Generate an SVG preview and simple CNC G-code outline for a single 7-segment dig
 """
 import math
 import argparse
+import os
+import configparser
 
 try:
     from PIL import Image, ImageDraw, ImageFont
@@ -28,6 +30,79 @@ except Exception:
 
 def fr(x):
     return f"{x:.3f}"
+
+
+# Profile defaults populated at runtime by load_profile(); parse_args will
+# consult PROFILE_DEFAULTS when choosing argument defaults. If no profile is
+# present the dict remains empty and hard-coded defaults are used.
+PROFILE_DEFAULTS = {}
+
+
+def load_profile(path):
+    """Read profile INI at `path` and return a dict of normalized arg defaults.
+
+    Keys in the INI may use '-' or '_' and will be normalized to argparse dest
+    names (underscores). Boolean values use configparser.getboolean.
+    """
+    if not path or not os.path.exists(path):
+        return {}
+    cfg = configparser.ConfigParser()
+    cfg.read(path)
+    if 'profile' not in cfg:
+        return {}
+    sec = cfg['profile']
+    out = {}
+    # mapping of arg name -> type converter for numeric/string values
+    type_map = {
+        'height': float,
+        'width': float,
+        'stroke': float,
+        'radius': float,
+        'bit': float,
+        'depth': float,
+        'passdepth': float,
+        'board_thickness': float,
+        'cutting_paths': int,
+        'board_height': float,
+        'board_width': float,
+        'board_outline': str,
+        'outprefix': str,
+        'spindle_speed': int,
+        'feed': float,
+        'plunge': float,
+        'gap': float,
+        'overlap': float,
+        'hgap': float,
+        'vert_length': float,
+        'hort_length': float,
+        'render_source': str,
+    }
+    # keys that should be interpreted as booleans
+    boolean_keys = set([
+        'show_board_dim', 'debug_centers', 'allow_vertical_overlap', 'pause_after_seg', 'debug_gcode', 'use_shapely', 'no_shapely', 'rotate'
+    ])
+
+    for raw_key in sec:
+        key = raw_key.replace('-', '_')
+        raw = sec.get(raw_key)
+        if raw is None:
+            continue
+        raw = raw.strip()
+        if raw == '':
+            continue
+        try:
+            if key in boolean_keys:
+                val = cfg.getboolean('profile', raw_key)
+            else:
+                conv = type_map.get(key, str)
+                val = conv(raw)
+        except Exception:
+            val = raw
+        out[key] = val
+    # capture free-form comment if present
+    if 'comment' in sec:
+        out['comment'] = sec.get('comment')
+    return out
 
 
 def rect_svg(x, y, w, h, rx, fill="none", stroke="#000", stroke_width=1):
@@ -93,52 +168,9 @@ def write_gcode(filename, W, H, segments, bit_dia=3.0, cut_depth=3.0, pass_depth
         processed = []
         dsx, dsy = desired_start
         def _dist_sq(p):
-            return (p[0]-dsx)*(p[0]-dsx) + (p[1]-dsy)*(p[1]-dsy)
-        for seg in segments:
-            poly = seg.get('poly')
-            if not poly:
-                x0 = seg['x']; y0 = seg['y']; w = seg['w']; h = seg['h']
-                poly = [(x0, y0), (x0+w, y0), (x0+w, y0+h), (x0, y0+h)]
-            tx_poly = [_tx(px, py) for (px, py) in poly]
-            start_idx = min(range(len(tx_poly)), key=lambda i: _dist_sq(tx_poly[i]))
-            best_dist = _dist_sq(tx_poly[start_idx])
-            processed.append({'tx_poly': tx_poly, 'start_idx': start_idx, 'best_dist': best_dist})
-        processed.sort(key=lambda s: s['best_dist'])
-
-        # Move to a known machine zero start first
-        f.write(f"G0 Z{fr(safe_z)}\n")
-        f.write("G0 X0 Y0\n")
-
-        for i in range(passes):
-            cur_depth = -(i + 1) * pass_step
-            if debug_gcode:
-                f.write(f"(pass {i+1}/{passes} to Z{fr(cur_depth)})\n")
-            for seginfo in processed:
-                tx_poly = seginfo['tx_poly']
-                start_idx = seginfo['start_idx']
-                # Ensure safe Z before any rapid moves
-                f.write(f"G0 Z{fr(safe_z)}\n")
-                sx, sy = tx_poly[start_idx]
-                # If pausing per segment, start spindle now (so spindle is running when approaching)
-                if pause_after_segment:
-                    if spindle_speed is not None:
-                        f.write(f"M3 S{int(spindle_speed)}\n")
-                    else:
-                        f.write("M3\n")
-                # rapid move to segment start
-                f.write(f"G0 X{fr(sx)} Y{fr(sy)}\n")
-                # plunge to cut depth
-                f.write(f"G1 Z{fr(cur_depth)} F{plunge}\n")
-                n = len(tx_poly)
-                for j in range(1, n+1):
-                    rx, ry = tx_poly[(start_idx + j) % n]
-                    f.write(f"G1 X{fr(rx)} Y{fr(ry)} F{feed}\n")
-                # retract to safe Z
-                f.write(f"G0 Z{fr(safe_z)}\n")
-                # stop spindle if we started it for this segment
-                if pause_after_segment:
-                    f.write(f"M5\n")
-                    f.write(f"M0\n")
+            dx = p[0] - dsx
+            dy = p[1] - dsy
+            return dx * dx + dy * dy
         ox, oy = desired_start
         if show_board and (board_w is not None) and (board_h is not None):
             off_x = -((board_w - W) / 2.0)
@@ -328,44 +360,48 @@ def make_segments(W, H, t, r, gap=None, overlap=0.0, hgap=0.0, vert_length=0.0, 
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument('--height', type=float, default=120.0, help='digit height in mm')
-    p.add_argument('--width', type=float, default=80.0, help='digit width in mm')
-    p.add_argument('--stroke', type=float, default=16.0, help='segment thickness in mm')
-    p.add_argument('--radius', type=float, default=10.0, help='corner radius in mm')
-    p.add_argument('--bit', type=float, default=2.0, help='cutter diameter in mm')
-    p.add_argument('--depth', type=float, default=None, help='cut depth in mm (overridden by --board-thickness)')
-    p.add_argument('--passdepth', type=float, default=0.5, help='depth per pass in mm (overridden by --board-thickness and --cutting-paths)')
-    p.add_argument('--board-thickness', type=float, default=4.5, help='total board thickness in mm (used as cut depth by default)')
-    p.add_argument('--cutting-paths', type=int, default=10, help='number of depth passes to cut through the board')
-    p.add_argument('--board-height', type=float, default=172.0, help='physical wooden board height in mm (default used when not specifying full board size)')
-    p.add_argument('--board-width', type=float, default=100.0, help='physical wooden board width in mm (if omitted it will be calculated from digit width + margins)')
-    p.add_argument('--show-board-dim', action='store_true', default=False, help='embed board dimension comments into the generated G-code and use a single demo pass')
-    p.add_argument('--board-outline', choices=['solid','dashed'], default='dashed', help='outline style for the board perimeter in the WEBP image')
-    p.add_argument('--debug-centers', action='store_true', default=False, help='draw center markers and reference lines in the WEBP for verification')
-    p.add_argument('--outprefix', type=str, default='N', help='output file prefix')
-    p.add_argument('--spindle-speed', type=int, default=10000, help='spindle speed S value (rpm or PWM). If set, emits M3 S<value> at start of G-code')
-    p.add_argument('--feed', type=float, default=1200.0, help='feed rate in mm/min (F value for G1 moves)')
-    p.add_argument('--plunge', type=float, default=300.0, help='plunge feed rate in mm/min (F value for Z plunges)')
-    p.add_argument('--gap', type=float, default=0.0, help='inter-segment gap in mm (overrides default t*0.5)')
-    p.add_argument('--overlap', type=float, default=2.0, help='positive value to let segments overlap (mm) to close chamfer gaps')
-    p.add_argument('--hgap', type=float, default=1.0, help='vertical shift for vertical segments: move F/B down by hgap and E/C up by hgap (mm)')
-    p.add_argument('--vert-length', type=float, default=5.0, help='adjustment (mm) to vertical lengths of F,B,E,C; negative reduces length (e.g. -1 reduces by 1mm)')
-    p.add_argument('--hort-length', type=float, default=50.0, help='override horizontal length for segments A,G,D in mm (optional)')
+    def _d(key, fallback):
+        return PROFILE_DEFAULTS.get(key, fallback)
+    # allow specifying profile path; when omitted main() will attempt to use ./profile.cfg
+    p.add_argument('--profile', type=str, default=None, help='Path to profile INI file. If omitted, uses ./profile.cfg when present.')
+    p.add_argument('--height', type=float, default=_d('height', 120.0), help='digit height in mm')
+    p.add_argument('--width', type=float, default=_d('width', 80.0), help='digit width in mm')
+    p.add_argument('--stroke', type=float, default=_d('stroke', 16.0), help='segment thickness in mm')
+    p.add_argument('--radius', type=float, default=_d('radius', 10.0), help='corner radius in mm')
+    p.add_argument('--bit', type=float, default=_d('bit', 2.0), help='cutter diameter in mm')
+    p.add_argument('--depth', type=float, default=_d('depth', None), help='cut depth in mm (overridden by --board-thickness)')
+    p.add_argument('--passdepth', type=float, default=_d('passdepth', 0.5), help='depth per pass in mm (overridden by --board-thickness and --cutting-paths)')
+    p.add_argument('--board-thickness', type=float, default=_d('board_thickness', 4.5), help='total board thickness in mm (used as cut depth by default)')
+    p.add_argument('--cutting-paths', type=int, default=_d('cutting_paths', 10), help='number of depth passes to cut through the board')
+    p.add_argument('--board-height', type=float, default=_d('board_height', 172.0), help='physical wooden board height in mm (default used when not specifying full board size)')
+    p.add_argument('--board-width', type=float, default=_d('board_width', 100.0), help='physical wooden board width in mm (if omitted it will be calculated from digit width + margins)')
+    p.add_argument('--show-board-dim', action='store_true', default=_d('show_board_dim', False), help='embed board dimension comments into the generated G-code and use a single demo pass')
+    p.add_argument('--board-outline', choices=['solid','dashed'], default=_d('board_outline', 'dashed'), help='outline style for the board perimeter in the WEBP image')
+    p.add_argument('--debug-centers', action='store_true', default=_d('debug_centers', True), help='draw center markers and reference lines in the WEBP for verification')
+    p.add_argument('--outprefix', type=str, default=_d('outprefix', 'N'), help='output file prefix')
+    p.add_argument('--spindle-speed', type=int, default=_d('spindle_speed', 10000), help='spindle speed S value (rpm or PWM). If set, emits M3 S<value> at start of G-code')
+    p.add_argument('--feed', type=float, default=_d('feed', 1200.0), help='feed rate in mm/min (F value for G1 moves)')
+    p.add_argument('--plunge', type=float, default=_d('plunge', 300.0), help='plunge feed rate in mm/min (F value for Z plunges)')
+    p.add_argument('--gap', type=float, default=_d('gap', 0.0), help='inter-segment gap in mm (overrides default t*0.5)')
+    p.add_argument('--overlap', type=float, default=_d('overlap', 2.0), help='positive value to let segments overlap (mm) to close chamfer gaps')
+    p.add_argument('--hgap', type=float, default=_d('hgap', 1.0), help='vertical shift for vertical segments: move F/B down by hgap and E/C up by hgap (mm)')
+    p.add_argument('--vert-length', type=float, default=_d('vert_length', 5.0), help='adjustment (mm) to vertical lengths of F,B,E,C; negative reduces length (e.g. -1 reduces by 1mm)')
+    p.add_argument('--hort-length', type=float, default=_d('hort_length', 50.0), help='override horizontal length for segments A,G,D in mm (optional)')
     p.add_argument('--allow-vertical-overlap', dest='allow_vertical_overlap', action='store_true', help='allow vertical segments to grow beyond gaps and overlap horizontals (default: enabled)')
     p.add_argument('--no-allow-vertical-overlap', dest='allow_vertical_overlap', action='store_false', help='disable vertical overlap; clamp vertical lengths to available gaps')
-    p.set_defaults(allow_vertical_overlap=True)
-    p.add_argument('--render-source', choices=['poly','rect'], default='poly', help='Render SVG/WEBP from chamfer polygons (poly) or from rectangular segment params (rect)')
-    p.add_argument('--pause-after-seg', action='store_true', default=False, help='Pause after finishing each segment: raise Z to safe and emit M0 to allow tool clearing/replacement')
-    p.add_argument('--debug-gcode', action='store_true', default=False, help='Emit parenthesized G-code comments for debugging (default: off)')
-    p.add_argument('--use-shapely', action='store_true', default=False, help='Force use of Shapely union (requires shapely)')
-    p.add_argument('--no-shapely', action='store_true', default=False, help='Disable Shapely union even if available')
+    p.set_defaults(allow_vertical_overlap=_d('allow_vertical_overlap', True))
+    p.add_argument('--render-source', choices=['poly','rect'], default=_d('render_source', 'poly'), help='Render SVG/WEBP from chamfer polygons (poly) or from rectangular segment params (rect)')
+    p.add_argument('--pause-after-seg', action='store_true', default=_d('pause_after_seg', False), help='Pause after finishing each segment: raise Z to safe and emit M0 to allow tool clearing/replacement')
+    p.add_argument('--debug-gcode', action='store_true', default=_d('debug_gcode', False), help='Emit parenthesized G-code comments for debugging (default: off)')
+    p.add_argument('--use-shapely', action='store_true', default=_d('use_shapely', False), help='Force use of Shapely union (requires shapely)')
+    p.add_argument('--no-shapely', action='store_true', default=_d('no_shapely', False), help='Disable Shapely union even if available')
     p.add_argument('--rotate', dest='rotate', action='store_true', help='Rotate output G-code by 90 degrees (default)')
     p.add_argument('--no-rotate', dest='rotate', action='store_false', help='Do not rotate output G-code')
-    p.set_defaults(rotate=True)
+    p.set_defaults(rotate=_d('rotate', True))
     return p.parse_args()
 
 
-def write_image(filename, W, H, segments, margin=10, scale=8, bg=(255,255,255), segcolor=(0,0,0), render_source='poly', show_board=False, board_w=None, board_h=None, rotate=False, board_outline='dashed', show_centers=False, rect_segments=None):
+def write_image(filename, W, H, segments, margin=10, scale=8, bg=(255,255,255), segcolor=(0,0,0), render_source='poly', show_board=False, board_w=None, board_h=None, rotate=False, board_outline='dashed', show_centers=True, rect_segments=None):
     if not _HAS_PIL:
         raise RuntimeError('Pillow not available; install with pip install pillow to generate webp image')
     px_w = int((W + 2*margin) * scale)
@@ -447,8 +483,13 @@ def write_image(filename, W, H, segments, margin=10, scale=8, bg=(255,255,255), 
         text_pos = (int(tlx) + 6, int(tly) + 6)
         draw.text(text_pos, label, fill=outline_color)
 
-    # overlay centerlines/markers/labels when rect_segments available
-    if rect_segments is not None:
+    # overlay centerlines/markers/labels when rect_segments available and enabled
+    if rect_segments is not None and show_centers:
+        # runtime hint for debugging whether overlay will be rendered
+        try:
+            print("[Make7Segment] overlay: drawing center markers and labels")
+        except Exception:
+            pass
         lookup = {s.get('name'): s for s in rect_segments}
         markers = []
         if 'A' in lookup:
@@ -530,7 +571,28 @@ def write_image(filename, W, H, segments, margin=10, scale=8, bg=(255,255,255), 
 
 
 if __name__ == '__main__':
+    # Determine profile path: CLI --profile wins, otherwise try ./profile.cfg
+    # Load profile first so parse_args() can consult PROFILE_DEFAULTS if needed.
+    cli_profile = None
+    # Quick pre-scan for --profile on argv to allow defaults to be set from it
+    import sys
+    for i, a in enumerate(sys.argv[1:], start=1):
+        if a == '--profile' and i < len(sys.argv):
+            cli_profile = sys.argv[i]
+            break
+        if a.startswith('--profile='):
+            cli_profile = a.split('=', 1)[1]
+            break
+
+    profile_path = cli_profile or ('profile.cfg' if os.path.exists('profile.cfg') else None)
+    PROFILE_DEFAULTS.clear()
+    if profile_path:
+        pd = load_profile(profile_path)
+        PROFILE_DEFAULTS.update(pd)
     args = parse_args()
+
+    # expose chosen profile name in summary
+    chosen_profile = profile_path or 'none'
     H = args.height
     W = args.width
     t = args.stroke
@@ -656,6 +718,7 @@ if __name__ == '__main__':
     print(f"Digit dimension (WxH): {W:.3f} mm x {H:.3f} mm")
 
     print("\nRun parameters:")
+    print(f"  - Profile: {chosen_profile}")
     print(f"  - Output prefix: {prefix}")
     print(f"  - Bit diameter: {args.bit:.3f} mm")
     print(f"  - Cut depth: {cut_depth:.3f} mm")
