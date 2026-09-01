@@ -17,6 +17,9 @@ Dependencies
 What changed recently
 - Default CLI sizes: `--height` defaults to `120.0` mm and `--width` defaults to `80.0` mm.
 - `--show-board-dim` no longer modifies the SVG or WebP outputs. When enabled it alters only G-code generation: the script emits a single shallow reference layer (one pass) and writes the board perimeter plus a digit bounding box and simple width/height indicator lines and comments so you can compare the two boxes in the G-code preview.
+ - `--show-board-dim` no longer modifies the SVG or WebP outputs. When enabled it alters only G-code generation: the script emits a single shallow reference layer (one pass) and writes the board perimeter plus a digit bounding box and simple width/height indicator lines and comments so you can compare the two boxes in the G-code preview.
+ - WEBP preview enhancement: the raster `--webp` preview now renders a green cutting-path overlay representing the tool centerline stroked at a thickness proportional to `--bit` (scaled for image). The filled segment polygons are drawn on top of that stroke so the WEBP shows the actual kerf/bit effect visually.
+ - Centerline guides: when `--debug-centers` / `--show-board-dim` are enabled the WEBP overlays center markers for each segment and draws vertical centerlines for segments `A`, `G`, and `D` (these lines span the full image height to match horizontal guides).
 - `--vert-length` is interpreted as an additive delta to the vertical rectangle heights (keeps centerlines fixed). Positive values increase vertical segment length; negative values shorten them. Clamping is controlled by `--allow-vertical-overlap` (default: enabled).
 - Added `--allow-vertical-overlap` / `--no-allow-vertical-overlap` to control whether verticals are allowed to grow beyond their available gaps. Default is `--allow-vertical-overlap` (enabled).
 - `--hort-length` now validates values and will raise a clear ValueError if set to `<= 0.0`.
@@ -33,6 +36,7 @@ Key CLI options (concise)
 - `--stroke` : segment thickness in mm
 - `--radius` : chamfer radius for chamfer polygon generation
 - `--bit` : cutter diameter (used in G-code comments)
+ - `--bit` : cutter diameter (used in G-code comments and to scale the green cutting-path stroke in the WEBP preview)
 - `--depth` / `--passdepth` / `--board-thickness` / `--cutting-paths` : control cut depth and pass splitting; when `--depth` omitted `--board-thickness` is used as depth.
 - `--board-width` / `--board-height` : optional demo board size (defaults: `100.0 x 172.0` mm)
 - `--show-board-dim` : emit board/digit reference geometry in the generated G-code and use a single shallow demo pass (does not change SVG/WebP)

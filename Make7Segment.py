@@ -463,7 +463,7 @@ def parse_args():
     return p.parse_args()
 
 
-def write_image(filename, W, H, segments, margin=10, scale=8, bg=(255,255,255), segcolor=(0,0,0), render_source='poly', show_board=False, board_w=None, board_h=None, rotate=False, board_outline='dashed', show_centers=True, rect_segments=None):
+def write_image(filename, W, H, segments, margin=10, scale=8, bg=(255,255,255), segcolor=(0,0,0), render_source='poly', show_board=False, board_w=None, board_h=None, rotate=False, board_outline='dashed', show_centers=True, rect_segments=None, bit_dia=2.0):
     if not _HAS_PIL:
         raise RuntimeError('Pillow not available; install with pip install pillow to generate webp image')
     px_w = int((W + 2*margin) * scale)
@@ -512,6 +512,23 @@ def write_image(filename, W, H, segments, margin=10, scale=8, bg=(255,255,255), 
         def _tx(x, y):
             return (x, y)
 
+    # First: draw cutting-paths (tool centerline stroked with bit width) in green
+    stroke_w = max(1, int(round(bit_dia * scale)))
+    cut_color = (0, 180, 0)
+    for seg in segments:
+        poly = seg.get('poly')
+        if render_source == 'poly' and poly:
+            transformed = [_tx(x, y) for (x, y) in poly]
+        else:
+            pts = chamfer_rect_points(seg['x'], seg['y'], seg['w'], seg['h'], seg.get('r', 0))
+            transformed = [_tx(x, y) for (x, y) in pts]
+        if not transformed:
+            continue
+        line_pts = [((margin + x) * scale, (margin + y) * scale) for (x, y) in transformed]
+        # draw closed thick polyline representing the cutter path (green)
+        draw.line(line_pts + [line_pts[0]], fill=cut_color, width=stroke_w)
+
+    # Then: draw the regular filled segments on top for visual context
     for seg in segments:
         poly = seg.get('poly')
         if render_source == 'poly' and poly:
@@ -553,6 +570,19 @@ def write_image(filename, W, H, segments, margin=10, scale=8, bg=(255,255,255), 
         except Exception:
             pass
         lookup = {s.get('name'): s for s in rect_segments}
+        # Draw vertical centerlines for A, G, D (segment center x across segment height)
+        centerline_color = (0, 160, 0)
+        for segname in ('A', 'G', 'D'):
+            if segname in lookup:
+                s = lookup[segname]
+                cx = s['x'] + s['w'] / 2.0
+                top_y = s['y']
+                bot_y = s['y'] + s['h']
+                sx, sy = _tx(cx, top_y)
+                ex, ey = _tx(cx, bot_y)
+                sx_s = (margin + sx) * scale
+                # Draw vertical centerline across full image height (so it shows on background)
+                _draw_dashed(sx_s, 0, sx_s, img.height, dash=max(6, int(scale*1.5)), gap=max(8, int(scale*2.0)), fill=centerline_color, width=max(1, int(scale/6)))
         markers = []
         if 'A' in lookup:
             A = lookup['A']
@@ -814,7 +844,7 @@ if __name__ == '__main__':
     if _HAS_PIL:
         imgfn = prefix + ".webp"
         try:
-            write_image(imgfn, W, H, out_segments, margin=margin, render_source=args.render_source, show_board=args.show_board_dim, board_w=board_w, board_h=board_h, rotate=False, board_outline=args.board_outline, show_centers=args.debug_centers, rect_segments=segments)
+            write_image(imgfn, W, H, out_segments, margin=margin, render_source=args.render_source, show_board=args.show_board_dim, board_w=board_w, board_h=board_h, rotate=False, board_outline=args.board_outline, show_centers=args.debug_centers, rect_segments=segments, bit_dia=args.bit)
             print(f"Wrote image: {imgfn}")
         except Exception as e:
             print("Image export failed:", e)

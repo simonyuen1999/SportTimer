@@ -4,3 +4,4 @@
 *.webp
 .DS_store
 .*.swp
+__pycache__/
