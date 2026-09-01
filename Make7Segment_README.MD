@@ -54,6 +54,16 @@ Key CLI options (concise)
   - `poly`: draw polygon vertices (matches G-code toolpaths)
   - `rect`: draw per-segment rounded rectangles from computed rect params
 
+Pocketing & rough/finish workflow (new)
+- `--pocket-middle` : when enabled the generator will remove interior material of each segment using horizontal pocketing scanlines (default: disabled). The pocket scanlines are performed at each depth pass so roughing and pocketing occur progressively as the tool steps deeper.
+- `--pocket-step` : lateral spacing between horizontal pocket scanlines in mm. Defaults to `0.9 * bit` when not specified.
+- `--rough-bit` / `--rough-step` : when `--pocket-middle` is enabled and a `--rough-bit` value is provided the tool will produce two output G-code files instead of one:
+  - `<prefix>_rough.gcode` — uses `--rough-bit` and `--rough-step` (or `0.9 * rough-bit` default) to rapidly remove bulk material with wider stepover.
+  - `<prefix>_finish.gcode` — uses the regular `--bit` and `--pocket-step` but will skip middle pocketing (only performs perimeter/profile passes). Run the rough file first, then the finish file.
+- Shapely integration: if Shapely is available the pocketing uses precise `LineString` intersections to produce clean horizontal runs; if not available the script falls back to a sampling-based point-in-polygon approach to detect inside runs for each scanline (this fallback is coarser and may produce more short moves).
+
+Config file keys (can be set in `*.cfg` profiles): `pocket-middle`, `pocket-step`, `rough-bit`, `rough-step` (use dashes or underscores).
+
 Shapely flags
 - `--use-shapely` : force boolean union (requires `shapely`)
 - `--no-shapely` : disable union and emit per-segment polygons
