@@ -61,6 +61,7 @@ Pocketing & rough/finish workflow (new)
 - `--rough-bit` / `--rough-step` : when `--pocket-middle` is enabled and a `--rough-bit` value is provided the tool will produce two output G-code files instead of one:
   - `<prefix>_rough.gcode` — uses `--rough-bit` and `--rough-step` (or `0.9 * rough-bit` default) to rapidly remove bulk material with wider stepover.
   - `<prefix>_finish.gcode` — uses the regular `--bit` and `--pocket-step` but will skip middle pocketing (only performs perimeter/profile passes). Run the rough file first, then the finish file.
+- `--rough-feed` : feed rate in mm/min to use for roughing passes (overrides `--feed` for the rough file when provided).
 - Shapely integration: if Shapely is available the pocketing uses precise `LineString` intersections to produce clean horizontal runs; if not available the script falls back to a sampling-based point-in-polygon approach to detect inside runs for each scanline (this fallback is coarser and may produce more short moves).
 
 Config file keys (can be set in `*.cfg` profiles): `pocket-middle`, `pocket-step`, `rough-bit`, `rough-step` (use dashes or underscores).
