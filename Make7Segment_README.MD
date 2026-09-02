@@ -42,6 +42,7 @@ Key CLI options (concise)
 - `--show-board-dim` : emit board/digit reference geometry in the generated G-code and use a single shallow demo pass (does not change SVG/WebP)
  - `--show-board-dim` : emit board/digit reference geometry in the generated G-code and use a single shallow demo pass (does not change SVG/WebP)
  - `--pause-after-seg` : pause the program after each segment (start spindle, cut segment, stop spindle, `M0` pause). Use this to perform per-segment inspections or tool changes.
+ - `--pause-after-layer` : pause after each depth layer across all segments when multiple passes are required. The generator performs one depth pass for every segment, then (unless it's the final pass) emits an inter-layer pause (`M5`, `G0 Z<safe>`, `M0`) so you can inspect, clear chips, or change tooling before continuing. Default: off.
  - `--debug-gcode` : when set, the generator will include parenthesized comment lines and extra debug comments in the G-code. Defaults to off (comments suppressed).
 - `--gap` / `--overlap` / `--hgap` : geometry tuning for closing seams and shifting verticals
 - `--vert-length` : signed delta applied to vertical segment heights (keeps centers fixed)
@@ -63,6 +64,10 @@ Pocketing & rough/finish workflow (new)
 - Shapely integration: if Shapely is available the pocketing uses precise `LineString` intersections to produce clean horizontal runs; if not available the script falls back to a sampling-based point-in-polygon approach to detect inside runs for each scanline (this fallback is coarser and may produce more short moves).
 
 Config file keys (can be set in `*.cfg` profiles): `pocket-middle`, `pocket-step`, `rough-bit`, `rough-step` (use dashes or underscores).
+
+Additional config keys:
+- `pause-after-seg` / `pause_after_seg` : boolean, same behavior as `--pause-after-seg`.
+- `pause-after-layer` / `pause_after_layer` : boolean, enable inter-layer pauses (skips pause after the final layer).
 
 Shapely flags
 - `--use-shapely` : force boolean union (requires `shapely`)
