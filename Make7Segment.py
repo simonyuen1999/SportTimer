@@ -403,9 +403,18 @@ def write_gcode(filename, W, H, segments, bit_dia=3.0, cut_depth=3.0, pass_depth
 
                     # pause after completing this layer across all segments (skip final layer)
                     if pi != (passes - 1):
+                        # stop spindle and retract then pause; go HOME (pause-after-layer always homes)
                         f.write("M5\n")
                         f.write(f"G0 Z{fr(safe_z)}\n")
+                        f.write("G0 X0 Y0\n")
                         f.write("M0\n")
+                        # after resume, return to the starting XY of the next layer
+                        try:
+                            if seg_items and len(seg_items) > 0:
+                                nx, ny = seg_items[0]['tx_pts'][0]
+                                f.write(f"G0 X{fr(nx)} Y{fr(ny)}\n")
+                        except Exception:
+                            pass
                         # restart spindle if we started it globally at the top
                         if spindle_speed is not None and (not pause_after_segment):
                             f.write(f"M3 S{int(spindle_speed)}\n")
