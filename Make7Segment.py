@@ -32,6 +32,19 @@ def fr(x):
     return f"{x:.3f}"
 
 
+def point_in_poly(x, y, poly):
+    inside = False
+    j = len(poly) - 1
+    for i in range(len(poly)):
+        xi, yi = poly[i]
+        xj, yj = poly[j]
+        intersect = ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi + 1e-12) + xi)
+        if intersect:
+            inside = not inside
+        j = i
+    return inside
+
+
 # Profile defaults populated at runtime by load_profile(); parse_args will
 # consult PROFILE_DEFAULTS when choosing argument defaults. If no profile is
 # present the dict remains empty and hard-coded defaults are used.
@@ -84,7 +97,7 @@ def load_profile(path):
     }
     # keys that should be interpreted as booleans
     boolean_keys = set([
-        'show_board_dim', 'debug_centers', 'allow_vertical_overlap', 'pause_after_seg', 'pause_after_layer', 'debug_gcode', 'use_shapely', 'no_shapely', 'rotate', 'pocket_middle'
+        'show_board_dim', 'debug_centers', 'allow_vertical_overlap', 'pause_after_seg', 'pause_after_layer', 'debug_gcode', 'use_shapely', 'no_shapely', 'rotate', 'pocket_middle', 'rough_last'
     ])
 
     for raw_key in sec:
@@ -148,6 +161,21 @@ def write_gcode(filename, W, H, segments, bit_dia=3.0, cut_depth=3.0, pass_depth
         if spindle_speed is not None and (not pause_after_segment):
             f.write(f"M3 S{int(spindle_speed)}\n")
         f.write(f"F{feed}\n")
+        # Track current Z so we can avoid unnecessary retract/plunge cycles.
+        cur_z = float(safe_z)
+        def _write_z(z, rapid=True, feedval=None):
+            nonlocal cur_z
+            zv = float(z)
+            if abs(cur_z - zv) < 1e-6:
+                return
+            if rapid:
+                f.write(f"G0 Z{fr(zv)}\n")
+            else:
+                if feedval is None:
+                    f.write(f"G1 Z{fr(zv)}\n")
+                else:
+                    f.write(f"G1 Z{fr(zv)} F{feedval}\n")
+            cur_z = zv
         # Determine cutting depth and pass plan. When showing board dims we
         # only generate a single shallow reference layer (demo) instead of
         # the full-depth multi-pass cut.
@@ -191,19 +219,19 @@ def write_gcode(filename, W, H, segments, bit_dia=3.0, cut_depth=3.0, pass_depth
                 f.write(f"(Board size: {board_w:.3f} mm x {board_h:.3f} mm)\n")
             # draw perimeter at shallow demo depth (one pass)
             demo_depth = pass_step if passes == 1 else min(0.5, float(cut_depth))
-            f.write(f"G0 Z{fr(safe_z)}\n")
+            _write_z(safe_z, rapid=True)
             # also draw the digit bounding box (W x H) so relationship is visible
             dbp = [(0.0, 0.0), (W, 0.0), (W, H), (0.0, H)]
             if debug_gcode:
                 f.write(f"(Digit bounding box - {W:.3f} x {H:.3f} mm)\n")
-            f.write(f"G0 Z{fr(safe_z)}\n")
+            _write_z(safe_z, rapid=True)
             dx0, dy0 = _tx(dbp[0][0], dbp[0][1])
             f.write(f"G0 X{fr(dx0)} Y{fr(dy0)}\n")
-            f.write(f"G1 Z{fr(-min(0.5, demo_depth))} F{plunge}\n")
+            _write_z(-min(0.5, demo_depth), rapid=False, feedval=plunge)
             for (cx, cy) in dbp[1:]+[dbp[0]]:
                 rx, ry = _tx(cx, cy)
                 f.write(f"G1 X{fr(rx)} Y{fr(ry)} F{feed}\n")
-            f.write(f"G0 Z{fr(safe_z)}\n")
+            _write_z(safe_z, rapid=True)
             # draw segment outlines as single shallow pass for reference
             for seg in segments:
                 poly = seg.get('poly')
@@ -215,20 +243,20 @@ def write_gcode(filename, W, H, segments, bit_dia=3.0, cut_depth=3.0, pass_depth
                 tx_pts = [_tx(x, y) for (x, y) in poly]
                 if not tx_pts:
                     continue
-                f.write(f"G0 Z{fr(safe_z)}\n")
+                _write_z(safe_z, rapid=True)
                 sx, sy = tx_pts[0]
                 f.write(f"G0 X{fr(sx)} Y{fr(sy)}\n")
-                f.write(f"G1 Z{fr(-min(0.5, demo_depth))} F{plunge}\n")
+                _write_z(-min(0.5, demo_depth), rapid=False, feedval=plunge)
                 for (px, py) in tx_pts[1:]+[tx_pts[0]]:
                     f.write(f"G1 X{fr(px)} Y{fr(py)} F{feed}\n")
-                f.write(f"G0 Z{fr(safe_z)}\n")
+                _write_z(safe_z, rapid=True)
             bx0, by0 = _tx(bp[0][0], bp[0][1])
             f.write(f"G0 X{fr(bx0)} Y{fr(by0)}\n")
-            f.write(f"G1 Z{fr(-demo_depth)} F{plunge}\n")
+            _write_z(-demo_depth, rapid=False, feedval=plunge)
             for (cx, cy) in bp[1:]+[bp[0]]:
                 rx, ry = _tx(cx, cy)
                 f.write(f"G1 X{fr(rx)} Y{fr(ry)} F{feed}\n")
-            f.write(f"G0 Z{fr(safe_z)}\n")
+            _write_z(safe_z, rapid=True)
 
             # draw simple dimension indicator lines for width and height
             # horizontal width line (above top edge)
@@ -239,10 +267,11 @@ def write_gcode(filename, W, H, segments, bit_dia=3.0, cut_depth=3.0, pass_depth
             ex, ey = _tx(wx2, wy)
             if debug_gcode:
                 f.write(f"(Board width indicator W={board_w:.3f} mm)\n")
-            f.write(f"G0 Z{fr(safe_z)}\nG0 X{fr(sx)} Y{fr(sy)}\n")
-            f.write(f"G1 Z{fr(-min(0.3, demo_depth))} F{plunge}\n")
+            _write_z(safe_z, rapid=True)
+            f.write(f"G0 X{fr(sx)} Y{fr(sy)}\n")
+            _write_z(-min(0.3, demo_depth), rapid=False, feedval=plunge)
             f.write(f"G1 X{fr(ex)} Y{fr(ey)} F{feed}\n")
-            f.write(f"G0 Z{fr(safe_z)}\n")
+            _write_z(safe_z, rapid=True)
 
             # vertical height line (to the right of board)
             hx, hy1 = bp[1][0] + dim_gap, bp[1][1]
@@ -251,17 +280,20 @@ def write_gcode(filename, W, H, segments, bit_dia=3.0, cut_depth=3.0, pass_depth
             ex, ey = _tx(hx, hy2)
             if debug_gcode:
                 f.write(f"(Board height indicator H={board_h:.3f} mm)\n")
-            f.write(f"G0 Z{fr(safe_z)}\nG0 X{fr(sx)} Y{fr(sy)}\n")
-            f.write(f"G1 Z{fr(-min(0.3, demo_depth))} F{plunge}\n")
+            _write_z(safe_z, rapid=True)
+            f.write(f"G0 X{fr(sx)} Y{fr(sy)}\n")
+            _write_z(-min(0.3, demo_depth), rapid=False, feedval=plunge)
             f.write(f"G1 X{fr(ex)} Y{fr(ey)} F{feed}\n")
-            f.write(f"G0 Z{fr(safe_z)}\n")
+            _write_z(safe_z, rapid=True)
         else:
             # Generate cutting paths for each segment polygon or rect when
             # not in "show board demo" mode. This emits rapid moves to the
             # start point, then performs the multi-pass profile cuts.
 
-            # Precompute transformed point lists for all segments so we can
-            # either perform per-segment multi-pass cuts or layer-major passes
+            # Precompute transformed point lists and bounding boxes for all
+            # segments so we can either perform per-segment multi-pass cuts or
+            # layer-major passes. Compute orientation (vertical/horizontal)
+            # from the transformed bounding box so rotation is respected.
             seg_items = []
             for seg in segments:
                 poly = seg.get('poly')
@@ -274,7 +306,15 @@ def write_gcode(filename, W, H, segments, bit_dia=3.0, cut_depth=3.0, pass_depth
                 tx_pts = [_tx(x, y) for (x, y) in poly]
                 if not tx_pts:
                     continue
-                seg_items.append({'tx_pts': tx_pts})
+                xs = [p[0] for p in tx_pts]
+                ys = [p[1] for p in tx_pts]
+                minx = min(xs)
+                maxx = max(xs)
+                miny = min(ys)
+                maxy = max(ys)
+                # orientation: vertical if height > width (after transform)
+                orientation = 'vertical' if (maxy - miny) > (maxx - minx) else 'horizontal'
+                seg_items.append({'tx_pts': tx_pts, 'minx': minx, 'maxx': maxx, 'miny': miny, 'maxy': maxy, 'orientation': orientation})
 
             # If requested, perform layer-major passes: do pass 1 for all
             # segments, then pass 2 for all segments, etc., pausing after
@@ -289,16 +329,32 @@ def write_gcode(filename, W, H, segments, bit_dia=3.0, cut_depth=3.0, pass_depth
                         if spindle_speed is not None and pause_after_segment:
                             f.write(f"M3 S{int(spindle_speed)}\n")
 
-                        # rapid to safe Z and start XY
-                        f.write(f"G0 Z{fr(safe_z)}\n")
+                        # Position to start of this segment. If we're already at
+                        # the target cutting depth we can move in XY at depth
+                        # (G1) to avoid retract/plunge cycles; otherwise retract
+                        # to safe Z, rapid to XY, then plunge.
                         sx, sy = tx_pts[0]
-                        f.write(f"G0 X{fr(sx)} Y{fr(sy)}\n")
-
-                        # single-pass cut for this layer
-                        f.write(f"G1 Z{fr(target_depth)} F{plunge}\n")
+                        if abs(cur_z - float(target_depth)) < 1e-6:
+                            f.write(f"G1 X{fr(sx)} Y{fr(sy)} F{feed}\n")
+                        else:
+                            _write_z(safe_z, rapid=True)
+                            f.write(f"G0 X{fr(sx)} Y{fr(sy)}\n")
+                            _write_z(target_depth, rapid=False, feedval=plunge)
                         for (px, py) in tx_pts[1:] + [tx_pts[0]]:
                             f.write(f"G1 X{fr(px)} Y{fr(py)} F{feed}\n")
-                        f.write(f"G0 Z{fr(safe_z)}\n")
+                        # By default retract to safe Z, but when there are more
+                        # segments in this same layer and we're not pausing per-seg
+                        # we can move in XY at cutting depth to the next segment
+                        # start to avoid extra Z travel.
+                        if (sidx + 1) < len(seg_items) and (not pause_after_segment):
+                            try:
+                                nx, ny = seg_items[sidx+1]['tx_pts'][0]
+                                # rapid XY travel at feed (keep Z at depth)
+                                f.write(f"G1 X{fr(nx)} Y{fr(ny)} F{feed}\n")
+                            except Exception:
+                                _write_z(safe_z, rapid=True)
+                        else:
+                            _write_z(safe_z, rapid=True)
 
                         # pocket interior material for this segment at this depth
                         if pocket_middle:
@@ -319,20 +375,36 @@ def write_gcode(filename, W, H, segments, bit_dia=3.0, cut_depth=3.0, pass_depth
                                     if poly_shp.is_empty:
                                         continue
                                     minx, miny, maxx, maxy = poly_shp.bounds
-                                    y = miny + (step * 0.5)
                                     lines = []
-                                    while y <= maxy:
-                                        from shapely.geometry import LineString
-                                        scan = LineString([(minx, y), (maxx, y)])
-                                        inter = poly_shp.intersection(scan)
-                                        if not inter.is_empty:
-                                            if inter.geom_type == 'LineString':
-                                                coords = list(inter.coords)
-                                                lines.append(coords)
-                                            elif inter.geom_type == 'MultiLineString':
-                                                for segline in inter.geoms:
-                                                    lines.append(list(segline.coords))
-                                        y += step
+                                    # choose scan direction by segment orientation
+                                    orient = seg_item.get('orientation', 'horizontal')
+                                    from shapely.geometry import LineString
+                                    if orient == 'horizontal':
+                                        pos = miny + (step * 0.5)
+                                        while pos <= maxy:
+                                            scan = LineString([(minx, pos), (maxx, pos)])
+                                            inter = poly_shp.intersection(scan)
+                                            if not inter.is_empty:
+                                                if inter.geom_type == 'LineString':
+                                                    coords = list(inter.coords)
+                                                    lines.append(coords)
+                                                elif inter.geom_type == 'MultiLineString':
+                                                    for segline in inter.geoms:
+                                                        lines.append(list(segline.coords))
+                                            pos += step
+                                    else:
+                                        pos = minx + (step * 0.5)
+                                        while pos <= maxx:
+                                            scan = LineString([(pos, miny), (pos, maxy)])
+                                            inter = poly_shp.intersection(scan)
+                                            if not inter.is_empty:
+                                                if inter.geom_type == 'LineString':
+                                                    coords = list(inter.coords)
+                                                    lines.append(coords)
+                                                elif inter.geom_type == 'MultiLineString':
+                                                    for segline in inter.geoms:
+                                                        lines.append(list(segline.coords))
+                                            pos += step
                                 else:
                                     # centroid-based shrink for non-Shapely fallback
                                     inset = float(pocket_inset) if pocket_inset is not None else 0.0
@@ -352,39 +424,130 @@ def write_gcode(filename, W, H, segments, bit_dia=3.0, cut_depth=3.0, pass_depth
                                         shrunk = [((cx + (x - cx) * scale), (cy + (y - cy) * scale)) for (x, y) in tx_pts]
                                     else:
                                         shrunk = tx_pts
-                                    y = min([p[1] for p in shrunk]) + (step * 0.5)
+                                    # choose scan direction by segment orientation
+                                    orient = seg_item.get('orientation', 'horizontal')
                                     lines = []
                                     sample = max(0.5, step / 4.0)
-                                    while y <= max([p[1] for p in shrunk]):
-                                        inside_runs = []
-                                        cur_run = None
-                                        x = min([p[0] for p in shrunk])
-                                        while x <= max([p[0] for p in shrunk]):
-                                            if point_in_poly(x, y, shrunk):
-                                                if cur_run is None:
-                                                    cur_run = [x, x]
+                                    if orient == 'horizontal':
+                                        start_pos = min([p[1] for p in shrunk]) + (step * 0.5)
+                                        end_pos = max([p[1] for p in shrunk])
+                                        min_scan = min([p[0] for p in shrunk])
+                                        max_scan = max([p[0] for p in shrunk])
+                                        pos = start_pos
+                                        while pos <= end_pos:
+                                            inside_runs = []
+                                            cur_run = None
+                                            x = min_scan
+                                            while x <= max_scan:
+                                                if point_in_poly(x, pos, shrunk):
+                                                    if cur_run is None:
+                                                        cur_run = [x, x]
+                                                    else:
+                                                        cur_run[1] = x
                                                 else:
-                                                    cur_run[1] = x
-                                            else:
-                                                if cur_run is not None:
-                                                    inside_runs.append(tuple(cur_run))
-                                                    cur_run = None
-                                            x += sample
-                                        if cur_run is not None:
-                                            inside_runs.append(tuple(cur_run))
-                                        for (sx, ex) in inside_runs:
-                                            if ex - sx >= 0.1:
-                                                lines.append([(sx, y), (ex, y)])
-                                        y += step
+                                                    if cur_run is not None:
+                                                        inside_runs.append(tuple(cur_run))
+                                                        cur_run = None
+                                                x += sample
+                                            if cur_run is not None:
+                                                inside_runs.append(tuple(cur_run))
+                                            for (sx, ex) in inside_runs:
+                                                if ex - sx >= 0.1:
+                                                    lines.append([(sx, pos), (ex, pos)])
+                                            pos += step
+                                    else:
+                                        start_pos = min([p[0] for p in shrunk]) + (step * 0.5)
+                                        end_pos = max([p[0] for p in shrunk])
+                                        min_scan = min([p[1] for p in shrunk])
+                                        max_scan = max([p[1] for p in shrunk])
+                                        pos = start_pos
+                                        while pos <= end_pos:
+                                            inside_runs = []
+                                            cur_run = None
+                                            y = min_scan
+                                            while y <= max_scan:
+                                                if point_in_poly(pos, y, shrunk):
+                                                    if cur_run is None:
+                                                        cur_run = [y, y]
+                                                    else:
+                                                        cur_run[1] = y
+                                                else:
+                                                    if cur_run is not None:
+                                                        inside_runs.append(tuple(cur_run))
+                                                        cur_run = None
+                                                y += sample
+                                            if cur_run is not None:
+                                                inside_runs.append(tuple(cur_run))
+                                            for (sy, ey) in inside_runs:
+                                                if ey - sy >= 0.1:
+                                                    lines.append([(pos, sy), (pos, ey)])
+                                            pos += step
 
-                                for coords in lines:
-                                    sx, sy = coords[0]
-                                    ex, ey = coords[-1]
-                                    f.write(f"G0 Z{fr(safe_z)}\n")
-                                    f.write(f"G0 X{fr(sx)} Y{fr(sy)}\n")
-                                    f.write(f"G1 Z{fr(target_depth)} F{plunge}\n")
-                                    f.write(f"G1 X{fr(ex)} Y{fr(ey)} F{feed}\n")
-                                    f.write(f"G0 Z{fr(safe_z)}\n")
+                                    if lines:
+                                        # Greedy nearest-neighbor ordering of scanlines.
+                                        curx, cury = sx, sy
+                                        remaining = list(range(len(lines)))
+                                        order = []
+                                        rev_flags = []
+                                        while remaining:
+                                            best = None
+                                            bestd = float('inf')
+                                            bestrev = False
+                                            for i in remaining:
+                                                s = lines[i][0]
+                                                e = lines[i][-1]
+                                                ds = (s[0]-curx)**2 + (s[1]-cury)**2
+                                                de = (e[0]-curx)**2 + (e[1]-cury)**2
+                                                if ds < bestd:
+                                                    bestd = ds; best = i; bestrev = False
+                                                if de < bestd:
+                                                    bestd = de; best = i; bestrev = True
+                                            order.append(best)
+                                            rev_flags.append(bestrev)
+                                            # update current to other endpoint after cutting
+                                            if bestrev:
+                                                curx, cury = lines[best][0]
+                                            else:
+                                                curx, cury = lines[best][-1]
+                                            remaining.remove(best)
+
+                                        # Position at first chosen start then plunge once.
+                                        # If already at target depth, move in XY at depth
+                                        # to the first scan start; otherwise retract,
+                                        # rapid to XY, then plunge.
+                                        first_idx = order[0]
+                                        first_rev = rev_flags[0]
+                                        if first_rev:
+                                            start_x, start_y = lines[first_idx][-1]
+                                        else:
+                                            start_x, start_y = lines[first_idx][0]
+                                        if abs(cur_z - float(target_depth)) < 1e-6:
+                                            f.write(f"G1 X{fr(start_x)} Y{fr(start_y)} F{feed}\n")
+                                        else:
+                                            _write_z(safe_z, rapid=True)
+                                            f.write(f"G0 X{fr(start_x)} Y{fr(start_y)}\n")
+                                            _write_z(target_depth, rapid=False, feedval=plunge)
+
+                                        # Execute ordered scanlines, reversing direction when needed
+                                        for oi, idx in enumerate(order):
+                                            rev = rev_flags[oi]
+                                            if not rev:
+                                                ex, ey = lines[idx][-1]
+                                                f.write(f"G1 X{fr(ex)} Y{fr(ey)} F{feed}\n")
+                                            else:
+                                                ex, ey = lines[idx][0]
+                                                f.write(f"G1 X{fr(ex)} Y{fr(ey)} F{feed}\n")
+                                            # move to next scan start at depth
+                                            if oi + 1 < len(order):
+                                                nidx = order[oi+1]
+                                                nrev = rev_flags[oi+1]
+                                                if nrev:
+                                                    nsx, nsy = lines[nidx][-1]
+                                                else:
+                                                    nsx, nsy = lines[nidx][0]
+                                                f.write(f"G1 X{fr(nsx)} Y{fr(nsy)} F{feed}\n")
+
+                                        _write_z(safe_z, rapid=True)
                             except Exception as e:
                                 if debug_gcode:
                                     f.write(f"(Pocketing error: {e})\n")
@@ -395,7 +558,7 @@ def write_gcode(filename, W, H, segments, bit_dia=3.0, cut_depth=3.0, pass_depth
                         if pause_after_segment and not (pi == (passes - 1) and sidx == (len(seg_items) - 1)):
                             # stop spindle and pause for operator intervention
                             f.write("M5\n")
-                            f.write(f"G0 Z{fr(safe_z)}\n")
+                            _write_z(safe_z, rapid=True)
                             f.write("M0\n")
                             # restart spindle when resuming next segment
                             if spindle_speed is not None:
@@ -405,7 +568,7 @@ def write_gcode(filename, W, H, segments, bit_dia=3.0, cut_depth=3.0, pass_depth
                     if pi != (passes - 1):
                         # stop spindle and retract then pause; go HOME (pause-after-layer always homes)
                         f.write("M5\n")
-                        f.write(f"G0 Z{fr(safe_z)}\n")
+                        _write_z(safe_z, rapid=True)
                         f.write("G0 X0 Y0\n")
                         f.write("M0\n")
                         # after resume, return to the starting XY of the next layer
@@ -427,19 +590,27 @@ def write_gcode(filename, W, H, segments, bit_dia=3.0, cut_depth=3.0, pass_depth
                     if spindle_speed is not None and pause_after_segment:
                         f.write(f"M3 S{int(spindle_speed)}\n")
 
-                    # rapid to safe Z and start XY
-                    f.write(f"G0 Z{fr(safe_z)}\n")
+                    # Position to start of this segment for multi-pass cutting.
                     sx, sy = tx_pts[0]
-                    f.write(f"G0 X{fr(sx)} Y{fr(sy)}\n")
-
+                    # For the first pass: if we're already at the intended
+                    # target depth (e.g. previous segment moved us here at
+                    # depth), move in XY at depth; otherwise retract/rapid
+                    # then plunge. Subsequent passes will use _write_z which
+                    # is a no-op when already at the requested Z.
+                    first_target = -min(pass_step, depth)
+                    if abs(cur_z - float(first_target)) < 1e-6:
+                        f.write(f"G1 X{fr(sx)} Y{fr(sy)} F{feed}\n")
+                    else:
+                        _write_z(safe_z, rapid=True)
+                        f.write(f"G0 X{fr(sx)} Y{fr(sy)}\n")
                     # multi-pass cutting
                     for pi in range(passes):
                         target_depth = -min((pi + 1) * pass_step, depth)
-                        f.write(f"G1 Z{fr(target_depth)} F{plunge}\n")
+                        _write_z(target_depth, rapid=False, feedval=plunge)
                         # follow polygon perimeter
                         for (px, py) in tx_pts[1:] + [tx_pts[0]]:
                             f.write(f"G1 X{fr(px)} Y{fr(py)} F{feed}\n")
-                        f.write(f"G0 Z{fr(safe_z)}\n")
+                        _write_z(safe_z, rapid=True)
 
                         # pocket interior material for this segment at this depth
                         if pocket_middle:
@@ -448,76 +619,169 @@ def write_gcode(filename, W, H, segments, bit_dia=3.0, cut_depth=3.0, pass_depth
                                 if _HAS_SHAPELY:
                                     poly_shp = Polygon(tx_pts)
                                     minx, miny, maxx, maxy = poly_shp.bounds
-                                    y = miny + (step * 0.5)
                                     lines = []
-                                    while y <= maxy:
-                                        from shapely.geometry import LineString
-                                        scan = LineString([(minx, y), (maxx, y)])
-                                        inter = poly_shp.intersection(scan)
-                                        if not inter.is_empty:
-                                            if inter.geom_type == 'LineString':
-                                                coords = list(inter.coords)
-                                                lines.append(coords)
-                                            elif inter.geom_type == 'MultiLineString':
-                                                for segline in inter.geoms:
-                                                    lines.append(list(segline.coords))
-                                        y += step
-                                    for coords in lines:
-                                        sx, sy = coords[0]
-                                        ex, ey = coords[-1]
-                                        f.write(f"G0 Z{fr(safe_z)}\n")
-                                        f.write(f"G0 X{fr(sx)} Y{fr(sy)}\n")
-                                        f.write(f"G1 Z{fr(target_depth)} F{plunge}\n")
-                                        f.write(f"G1 X{fr(ex)} Y{fr(ey)} F{feed}\n")
-                                        f.write(f"G0 Z{fr(safe_z)}\n")
-                                else:
-                                    def point_in_poly(x, y, poly):
-                                        inside = False
-                                        j = len(poly) - 1
-                                        for i in range(len(poly)):
-                                            xi, yi = poly[i]
-                                            xj, yj = poly[j]
-                                            intersect = ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi + 1e-12) + xi)
-                                            if intersect:
-                                                inside = not inside
-                                            j = i
-                                        return inside
+                                    orient = seg_item.get('orientation', 'horizontal')
+                                    from shapely.geometry import LineString
+                                    if orient == 'horizontal':
+                                        pos = miny + (step * 0.5)
+                                        while pos <= maxy:
+                                            scan = LineString([(minx, pos), (maxx, pos)])
+                                            inter = poly_shp.intersection(scan)
+                                            if not inter.is_empty:
+                                                if inter.geom_type == 'LineString':
+                                                    coords = list(inter.coords)
+                                                    lines.append(coords)
+                                                elif inter.geom_type == 'MultiLineString':
+                                                    for segline in inter.geoms:
+                                                        lines.append(list(segline.coords))
+                                            pos += step
+                                    else:
+                                        pos = minx + (step * 0.5)
+                                        while pos <= maxx:
+                                            scan = LineString([(pos, miny), (pos, maxy)])
+                                            inter = poly_shp.intersection(scan)
+                                            if not inter.is_empty:
+                                                if inter.geom_type == 'LineString':
+                                                    coords = list(inter.coords)
+                                                    lines.append(coords)
+                                                elif inter.geom_type == 'MultiLineString':
+                                                    for segline in inter.geoms:
+                                                        lines.append(list(segline.coords))
+                                            pos += step
+                                    if lines:
+                                        # Greedy nearest-neighbor ordering of scanlines.
+                                        curx, cury = sx, sy
+                                        remaining = list(range(len(lines)))
+                                        order = []
+                                        rev_flags = []
+                                        while remaining:
+                                            best = None
+                                            bestd = float('inf')
+                                            bestrev = False
+                                            for i in remaining:
+                                                s = lines[i][0]
+                                                e = lines[i][-1]
+                                                ds = (s[0]-curx)**2 + (s[1]-cury)**2
+                                                de = (e[0]-curx)**2 + (e[1]-cury)**2
+                                                if ds < bestd:
+                                                    bestd = ds; best = i; bestrev = False
+                                                if de < bestd:
+                                                    bestd = de; best = i; bestrev = True
+                                            order.append(best)
+                                            rev_flags.append(bestrev)
+                                            # update current to other endpoint after cutting
+                                            if bestrev:
+                                                curx, cury = lines[best][0]
+                                            else:
+                                                curx, cury = lines[best][-1]
+                                            remaining.remove(best)
 
-                                    xs = [p[0] for p in tx_pts]
-                                    minx = min(xs)
-                                    maxx = max(xs)
-                                    y = min([p[1] for p in tx_pts]) + (step * 0.5)
+                                        # Position at first chosen start then plunge once
+                                        first_idx = order[0]
+                                        first_rev = rev_flags[0]
+                                        if first_rev:
+                                            start_x, start_y = lines[first_idx][-1]
+                                        else:
+                                            start_x, start_y = lines[first_idx][0]
+                                        _write_z(safe_z, rapid=True)
+                                        f.write(f"G0 X{fr(start_x)} Y{fr(start_y)}\n")
+                                        _write_z(target_depth, rapid=False, feedval=plunge)
+
+                                        # Execute ordered scanlines, reversing direction when needed
+                                        for oi, idx in enumerate(order):
+                                            rev = rev_flags[oi]
+                                            if not rev:
+                                                ex, ey = lines[idx][-1]
+                                                f.write(f"G1 X{fr(ex)} Y{fr(ey)} F{feed}\n")
+                                            else:
+                                                ex, ey = lines[idx][0]
+                                                f.write(f"G1 X{fr(ex)} Y{fr(ey)} F{feed}\n")
+                                            # move to next scan start at depth
+                                            if oi + 1 < len(order):
+                                                nidx = order[oi+1]
+                                                nrev = rev_flags[oi+1]
+                                                if nrev:
+                                                    nsx, nsy = lines[nidx][-1]
+                                                else:
+                                                    nsx, nsy = lines[nidx][0]
+                                                f.write(f"G1 X{fr(nsx)} Y{fr(nsy)} F{feed}\n")
+
+                                        _write_z(safe_z, rapid=True)
+                                else:
+                                    orient = seg_item.get('orientation', 'horizontal')
                                     lines = []
                                     sample = max(0.5, step / 4.0)
-                                    while y <= max([p[1] for p in tx_pts]):
-                                        inside_runs = []
-                                        cur_run = None
-                                        x = minx
-                                        while x <= maxx:
-                                            if point_in_poly(x, y, tx_pts):
-                                                if cur_run is None:
-                                                    cur_run = [x, x]
+                                    if orient == 'horizontal':
+                                        xs = [p[0] for p in tx_pts]
+                                        minx = min(xs)
+                                        maxx = max(xs)
+                                        y = min([p[1] for p in tx_pts]) + (step * 0.5)
+                                        end_y = max([p[1] for p in tx_pts])
+                                        while y <= end_y:
+                                            inside_runs = []
+                                            cur_run = None
+                                            x = minx
+                                            while x <= maxx:
+                                                if point_in_poly(x, y, tx_pts):
+                                                    if cur_run is None:
+                                                        cur_run = [x, x]
+                                                    else:
+                                                        cur_run[1] = x
                                                 else:
-                                                    cur_run[1] = x
-                                            else:
-                                                if cur_run is not None:
-                                                    inside_runs.append(tuple(cur_run))
-                                                    cur_run = None
-                                            x += sample
-                                        if cur_run is not None:
-                                            inside_runs.append(tuple(cur_run))
-                                        for (sx, ex) in inside_runs:
-                                            if ex - sx >= 0.1:
-                                                lines.append([(sx, y), (ex, y)])
-                                        y += step
-                                    for coords in lines:
-                                        sx, sy = coords[0]
-                                        ex, ey = coords[-1]
-                                        f.write(f"G0 Z{fr(safe_z)}\n")
-                                        f.write(f"G0 X{fr(sx)} Y{fr(sy)}\n")
-                                        f.write(f"G1 Z{fr(target_depth)} F{plunge}\n")
-                                        f.write(f"G1 X{fr(ex)} Y{fr(ey)} F{feed}\n")
-                                        f.write(f"G0 Z{fr(safe_z)}\n")
+                                                    if cur_run is not None:
+                                                        inside_runs.append(tuple(cur_run))
+                                                        cur_run = None
+                                                x += sample
+                                            if cur_run is not None:
+                                                inside_runs.append(tuple(cur_run))
+                                            for (sx, ex) in inside_runs:
+                                                if ex - sx >= 0.1:
+                                                    lines.append([(sx, y), (ex, y)])
+                                            y += step
+                                    else:
+                                        ys = [p[1] for p in tx_pts]
+                                        miny = min(ys)
+                                        maxy = max(ys)
+                                        x = min([p[0] for p in tx_pts]) + (step * 0.5)
+                                        end_x = max([p[0] for p in tx_pts])
+                                        while x <= end_x:
+                                            inside_runs = []
+                                            cur_run = None
+                                            y = miny
+                                            while y <= maxy:
+                                                if point_in_poly(x, y, tx_pts):
+                                                    if cur_run is None:
+                                                        cur_run = [y, y]
+                                                    else:
+                                                        cur_run[1] = y
+                                                else:
+                                                    if cur_run is not None:
+                                                        inside_runs.append(tuple(cur_run))
+                                                        cur_run = None
+                                                y += sample
+                                            if cur_run is not None:
+                                                inside_runs.append(tuple(cur_run))
+                                            for (sy, ey) in inside_runs:
+                                                if ey - sy >= 0.1:
+                                                    lines.append([(x, sy), (x, ey)])
+                                            x += step
+                                    if lines:
+                                        fsx, fsy = lines[0][0]
+                                        if abs(cur_z - float(target_depth)) < 1e-6:
+                                            f.write(f"G1 X{fr(fsx)} Y{fr(fsy)} F{feed}\n")
+                                        else:
+                                            _write_z(safe_z, rapid=True)
+                                            f.write(f"G0 X{fr(fsx)} Y{fr(fsy)}\n")
+                                            _write_z(target_depth, rapid=False, feedval=plunge)
+                                        for li, coords in enumerate(lines):
+                                            sx, sy = coords[0]
+                                            ex, ey = coords[-1]
+                                            f.write(f"G1 X{fr(ex)} Y{fr(ey)} F{feed}\n")
+                                            if li + 1 < len(lines):
+                                                nsx, nsy = lines[li+1][0]
+                                                f.write(f"G1 X{fr(nsx)} Y{fr(nsy)} F{feed}\n")
+
+                                        _write_z(safe_z, rapid=True)
                             except Exception as e:
                                 if debug_gcode:
                                     f.write(f"(Pocketing error: {e})\n")
@@ -527,14 +791,14 @@ def write_gcode(filename, W, H, segments, bit_dia=3.0, cut_depth=3.0, pass_depth
                     if pause_after_segment and not (sidx == (len(seg_items) - 1)):
                         # stop spindle and pause for operator intervention
                         f.write("M5\n")
-                        f.write(f"G0 Z{fr(safe_z)}\n")
+                        _write_z(safe_z, rapid=True)
                         f.write("M0\n")
                         # restart spindle when resuming next segment
                         if spindle_speed is not None:
                             f.write(f"M3 S{int(spindle_speed)}\n")
         # stop spindle and return to home
         f.write("M5\n")
-        f.write(f"G0 Z{fr(safe_z)}\n")
+        _write_z(safe_z, rapid=True)
         if debug_gcode:
             f.write("(Returning to machine HOME X0 Y0)\n")
         f.write("G0 X0 Y0\n")
@@ -710,6 +974,7 @@ def parse_args():
     p.add_argument('--rough-bit', type=float, default=_d('rough_bit', None), help='Optional larger bit diameter for roughing passes (mm)')
     p.add_argument('--rough-step', type=float, default=_d('rough_step', None), help='Scanline spacing for roughing pocketing (mm). Defaults to 0.9*rough-bit')
     p.add_argument('--rough-feed', type=float, default=_d('rough_feed', None), help='feed rate (F) to use for roughing passes in mm/min (defaults to --feed)')
+    p.add_argument('--rough-last', action='store_true', default=_d('rough_last', False), help='When roughing, perform only the final rough layer (single rough pass)')
     return p.parse_args()
 
 
@@ -1209,13 +1474,18 @@ if __name__ == '__main__':
         # Rough pass targets (cumulative Z layers) use the rough step value
         rough_passes = max(1, int(math.ceil(cut_depth / rough_step_val)))
         rough_pass_step = cut_depth / rough_passes
+        # If user requested only the last rough layer, collapse to a single rough pass
+        if getattr(args, 'rough_last', False):
+            rough_passes = 1
+            rough_pass_step = cut_depth
+            print("  - rough_last enabled: performing a single final rough layer")
         print("Rough pass targets (cumulative Z):")
         for i in range(rough_passes):
             rcum = min((i + 1) * rough_pass_step, cut_depth)
             rcum_z = -rcum
             print(f"  - Pass {i+1}: Z = {rcum_z:.3f} mm")
 
-        write_gcode(rough_gfn, W, H, out_segments, bit_dia=args.rough_bit, cut_depth=cut_depth, pass_depth=rough_step_val, feed=rough_feed_val, plunge=args.plunge, show_board=args.show_board_dim, board_w=board_w, board_h=board_h, margin=margin, rotate=args.rotate, spindle_speed=args.spindle_speed, pause_after_segment=args.pause_after_seg, pause_after_layer=args.pause_after_layer, debug_gcode=args.debug_gcode, pocket_middle=args.pocket_middle, pocket_step=rough_step_val, pocket_inset=rough_inset)
+        write_gcode(rough_gfn, W, H, out_segments, bit_dia=args.rough_bit, cut_depth=cut_depth, pass_depth=rough_step_val, feed=rough_feed_val, plunge=args.plunge, show_board=args.show_board_dim, board_w=board_w, board_h=board_h, margin=margin, rotate=args.rotate, spindle_speed=args.spindle_speed, pause_after_segment=args.pause_after_seg, pause_after_layer=args.pause_after_layer, debug_gcode=args.debug_gcode, pocket_middle=args.pocket_middle, pocket_step=rough_step_val, pocket_inset=rough_inset, finish_only=getattr(args, 'rough_last', False))
         # finishing pass: use regular bit and skip middle pocketing because
         # rough pass already removed bulk material.
         write_gcode(finish_gfn, W, H, out_segments, bit_dia=args.bit, cut_depth=cut_depth, pass_depth=pass_step, feed=args.feed, plunge=args.plunge, show_board=args.show_board_dim, board_w=board_w, board_h=board_h, margin=margin, rotate=args.rotate, spindle_speed=args.spindle_speed, pause_after_segment=args.pause_after_seg, pause_after_layer=args.pause_after_layer, debug_gcode=args.debug_gcode, pocket_middle=False, pocket_step=None, finish_only=True)
