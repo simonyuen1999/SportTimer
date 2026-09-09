@@ -20,6 +20,7 @@ from Make7Segment import (
     write_gcode,
 )
 
+# Optional Pillow support for WEBP output
 try:
     from PIL import Image, ImageDraw
     _HAS_PIL = True
@@ -29,25 +30,11 @@ except Exception:
     _HAS_PIL = False
 
 
-PHOTO_DEFAULTS = {
-    # Tuned against 7Segment.jpg proportions.
-    'height': 120.0,
-    'width': 80.0,
-    'stroke': 13.0,
-    'radius': 3.0,
-    'gap': 0.0,
-    'overlap': 0.0,
-    'hgap': 0.0,
-    'vert_length': 2.0,
-    'hort_length': 50.0,
-    'render_source': 'poly',
-    'outprefix': 'example_output',
-    'd_scale': 0.95,
-}
-
-
 def _fr(v):
-    return f"{float(v):.3f}"
+    try:
+        return f"{float(v):.3f}".rstrip('0').rstrip('.')
+    except Exception:
+        return str(v)
 
 
 def _arg_given(argv, long_name):
@@ -57,6 +44,24 @@ def _arg_given(argv, long_name):
         if a == flag or a.startswith(prefix):
             return True
     return False
+
+
+# Photo-oriented defaults used when profile/CLI do not specify values.
+PHOTO_DEFAULTS = {
+    'width': 44.0,
+    'height': 88.0,
+    'stroke': 2.0,
+    'radius': 1.0,
+    'gap': 2.0,
+    'overlap': 0.5,
+    'hgap': 2.0,
+    'vert_length': 20.0,
+    'hort_length': 10.0,
+    'render_source': 'photo',
+    'd_scale': 1.0,
+    'outprefix': 'A',
+}
+ 
 
 
 def _apply_photo_defaults(args, argv):
@@ -584,6 +589,263 @@ def main():
                     if d_x5 is not None and len(apts) > 5:
                         apts[5] = (d_x5, apts[5][1])
                     seg['poly'] = apts
+                break
+
+    # Adjust Segment B per user request:
+    # - keep B5 unchanged
+    # - extend B0 up and right, extend B1 up (keep B1.x unchanged)
+    # - then reduce the B0-B1 distance to half while keeping B1.x fixed
+    for seg in segments:
+        if seg.get('name') == 'B':
+            bpts = seg.get('poly', [])
+            if len(bpts) > 5:
+                try:
+                    import math
+                    x0, y0 = bpts[0]
+                    x1, y1 = bpts[1]
+                    x5, y5 = bpts[5]
+
+                    # original distance between B0 and B1
+                    L = math.hypot(x1 - x0, y1 - y0)
+                    if L < 1e-9:
+                        continue
+
+                    # offsets proportional to L
+                    right_offset = L * 0.25
+                    up_offset = L * 0.25
+
+                    # provisional moves: B0 moves up (y - up_offset) and right (+right_offset)
+                    prov_x0 = x0 + right_offset
+                    prov_y0 = y0 - up_offset
+
+                    # B1 moves up; x remains unchanged
+                    prov_x1 = x1
+                    prov_y1 = y1 - up_offset
+
+                    # compute vector from provisional B0 to provisional B1
+                    vx = prov_x1 - prov_x0
+                    vy = prov_y1 - prov_y0
+
+                    # shorten that vector by half, keeping B1.x fixed (we move B0 towards B1)
+                    final_x1 = prov_x1
+                    final_y1 = prov_y1
+                    final_x0 = final_x1 - vx * 0.5
+                    final_y0 = final_y1 - vy * 0.5
+
+                    # commit: keep B5 unchanged
+                    bpts[0] = (final_x0, final_y0)
+                    bpts[1] = (final_x1, final_y1)
+                    bpts[5] = (x5, y5)
+                    seg['poly'] = bpts
+                except Exception:
+                    pass
+
+    # Re-orient the line between B0 and B5 to match the angle of A2->A3.
+    # Keep B5 fixed. Only move B0 and B1 (B1.x unchanged).
+    # Compute angle from A2->A3, rotate B0 around B5 to that angle preserving distance.
+    a2 = a3 = None
+    for seg in segments:
+        if seg.get('name') == 'A':
+            apts = seg.get('poly', [])
+            if len(apts) > 3:
+                a2 = apts[2]
+                a3 = apts[3]
+            break
+
+    if a2 is not None and a3 is not None:
+        for seg in segments:
+            if seg.get('name') == 'B':
+                bpts = seg.get('poly', [])
+                if len(bpts) > 5:
+                    try:
+                        import math
+                        x0, y0 = bpts[0]
+                        x1, y1 = bpts[1]
+                        x5, y5 = bpts[5]
+
+                        # angle of A2->A3
+                        theta = math.atan2(a3[1] - a2[1], a3[0] - a2[0])
+
+                        # preserve distance from B5 to B0
+                        r = math.hypot(x5 - x0, y5 - y0)
+
+                        # new B0 so that vector B0->B5 has angle theta
+                        new_x0 = x5 - r * math.cos(theta)
+                        new_y0 = y5 - r * math.sin(theta)
+
+                        # provisional B1: keep x, move up by same up_offset as before
+                        up_offset = math.hypot(x1 - x0, y1 - y0) * 0.25
+                        prov_x1 = x1
+                        prov_y1 = y1 - up_offset
+
+                        # vector from new B0 to provisional B1
+                        vx = prov_x1 - new_x0
+                        vy = prov_y1 - new_y0
+                        target = 0.5 * math.hypot(vx, vy)
+
+                        dx = prov_x1 - new_x0
+                        # solve for y such that distance^2 = target^2
+                        rem = target * target - dx * dx
+                        if rem >= 0:
+                            sign = -1 if prov_y1 < new_y0 else 1
+                            final_y1 = new_y0 + sign * math.sqrt(rem)
+                        else:
+                            # fallback: use provisional y
+                            final_y1 = prov_y1
+
+                        # assign B0 and B1 (keep B1.x unchanged)
+                        bpts[0] = (new_x0, new_y0)
+                        bpts[1] = (x1, final_y1)
+                        seg['poly'] = bpts
+                    except Exception:
+                        pass
+                break
+
+    # Align Segment F per user request:
+    # - keep F1 position unchanged
+    # - keep F5.x unchanged (we keep F5 fully fixed for stability)
+    # - move F0 so that the line F1->F0 has the same angle as A4->A5
+    # - ensure the distance F0-F5 is half its original length
+    a4 = a5 = None
+    for seg in segments:
+        if seg.get('name') == 'A':
+            apts = seg.get('poly', [])
+            if len(apts) > 5:
+                a4 = apts[4]
+                a5 = apts[5]
+            break
+
+    if a4 is not None and a5 is not None:
+        for seg in segments:
+            if seg.get('name') == 'F':
+                fpts = seg.get('poly', [])
+                if len(fpts) > 5:
+                    try:
+                        import math
+
+                        x0, y0 = fpts[0]
+                        x1, y1 = fpts[1]
+                        x5, y5 = fpts[5]
+
+                        # find B0.y and B1.y to align F5.y and F0.y
+                        b0y = None
+                        b1y = None
+                        for s in segments:
+                            if s.get('name') == 'B':
+                                bpts = s.get('poly', [])
+                                if len(bpts) > 1:
+                                    b0y = bpts[0][1]
+                                    b1y = bpts[1][1]
+                                break
+
+                        # desired target distance between F0 and F5 is half the current
+                        r = math.hypot(x0 - x5, y0 - y5)
+                        target = r * 0.5
+
+                        # set F5.y to B1.y if available, keep F5.x unchanged
+                        new_x5 = x5
+                        new_y5 = b1y if (b1y is not None) else y5
+
+                        # set F0.y to B0.y if available
+                        new_y0 = b0y if (b0y is not None) else y0
+
+                        # solve for new_x0 such that distance between (new_x0,new_y0) and (new_x5,new_y5) == target
+                        dy = new_y0 - new_y5
+                        rem = target * target - dy * dy
+                        if rem >= 0:
+                            dx = math.sqrt(rem)
+                            # choose side consistent with original x0 relative to x5
+                            if x0 < x5:
+                                new_x0 = new_x5 - dx
+                            else:
+                                new_x0 = new_x5 + dx
+                        else:
+                            # fallback: move halfway in x towards x5
+                            new_x0 = new_x5 + (x0 - new_x5) * 0.5
+
+                        # apply changes: keep F1 unchanged, set F0 and F5 as computed
+                        fpts[0] = (new_x0, new_y0)
+                        fpts[5] = (new_x5, new_y5)
+                        seg['poly'] = fpts
+                    except Exception:
+                        pass
+                break
+
+    # Adjust Segment C per user request:
+    # - C4 stays fixed
+    # - C2.x stays the same, C2.y may change
+    # - C3 changes
+    # - reduce the C2-C3 span by half (move both toward each other vertically while keeping C2.x)
+    # - angle of C4->C3 should match angle of D1->D2
+    d1 = d2 = None
+    for seg in segments:
+        if seg.get('name') == 'D':
+            dpts = seg.get('poly', [])
+            if len(dpts) > 2:
+                d1 = dpts[1]
+                d2 = dpts[2]
+            break
+
+    if d1 is not None and d2 is not None:
+        import math
+        theta_cd = math.atan2(d2[1] - d1[1], d2[0] - d1[0])
+        cos_td = math.cos(theta_cd)
+        sin_td = math.sin(theta_cd)
+
+        for seg in segments:
+            if seg.get('name') == 'C':
+                cpts = seg.get('poly', [])
+                if len(cpts) > 4:
+                    try:
+                        # indices: C0..C5 ; we care about C2 (index 2), C3 (3), C4 (4)
+                        x2, y2 = cpts[2]
+                        x3, y3 = cpts[3]
+                        x4, y4 = cpts[4]
+
+                        # preserve C4
+                        # preserve original C2-C3 length
+                        orig_len = math.hypot(x3 - x2, y3 - y2)
+
+
+                        # compute unit vector along C4->C3 (preserve this angle)
+                        ux = (x3 - x4)
+                        uy = (y3 - y4)
+                        ul = math.hypot(ux, uy)
+                        if ul < 1e-9:
+                            ul = 1.0
+                        ux /= ul
+                        uy /= ul
+
+                        # project vector from C4 to C2 onto this unit vector to get r_proj
+                        vx = x2 - x4
+                        vy = y2 - y4
+                        r_proj = vx * ux + vy * uy
+
+                        # place C3 at projection distance along the preserved angle
+                        new_x3 = x4 + r_proj * ux
+                        new_y3 = y4 + r_proj * uy
+
+                        # now set target distance is half original
+                        target = orig_len * 0.5
+
+                        # compute horizontal offset between C2.x and new C3.x
+                        dx = new_x3 - x2
+                        rem = target * target - dx * dx
+                        if rem >= 0:
+                            dy = math.sqrt(rem)
+                            # choose new C2.y above C3 (smaller y value)
+                            new_y2 = new_y3 - dy
+                        else:
+                            # if impossible, fall back to moving C2 partly toward new_y3
+                            new_y2 = y2 + 0.25 * (new_y3 - y2)
+
+                        # write back: keep C4 unchanged
+                        cpts[2] = (x2, new_y2)
+                        cpts[3] = (new_x3, new_y3)
+                        # cpts[4] remains (x4,y4)
+                        seg['poly'] = cpts
+                    except Exception:
+                        pass
                 break
 
     prefix = args.outprefix or 'example_output'
