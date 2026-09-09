@@ -440,6 +440,152 @@ def main():
                 except Exception:
                     pass
 
+    # Segment D additional tweaks per user request:
+    # - Keep D1 fixed
+    # - Preserve D1->D2 angle, extend D2 further along that direction
+    # - Move D3 to the right, then reduce the D2->D3 span by half
+    for seg in segments:
+        if seg.get('name') == 'D':
+            pts = seg.get('poly', [])
+            if len(pts) > 3:
+                try:
+                    import math
+
+                    x1, y1 = pts[1]
+                    x2, y2 = pts[2]
+                    x3, y3 = pts[3]
+
+                    # keep D1 unchanged (pts[1] stays as is)
+
+                    # vector from D1 to D2
+                    vx = x2 - x1
+                    vy = y2 - y1
+                    L = math.hypot(vx, vy)
+                    if L > 1e-9:
+                        ux = vx / L
+                        uy = vy / L
+
+                        # extend D2 along the same angle by 50% (L -> 1.5L)
+                        new_L = L * 1.5
+                        new_x2 = x1 + ux * new_L
+                        new_y2 = y1 + uy * new_L
+
+                        # move D3 to the right by a small offset proportional to L
+                        right_offset = L * 0.25
+                        prov_x3 = x3 + right_offset
+                        prov_y3 = y3
+
+                        # compute provisional vector from new D2 to provisional D3
+                        pvx = prov_x3 - new_x2
+                        pvy = prov_y3 - new_y2
+
+                        # reduce that vector length by half
+                        final_x3 = new_x2 + pvx * 0.5
+                        final_y3 = new_y2 + pvy * 0.5
+
+                        # write back updated points
+                        pts[2] = (new_x2, new_y2)
+                        pts[3] = (final_x3, final_y3)
+                        # enforce D3.y == D4.y per user request
+                        if len(pts) > 4:
+                            try:
+                                dx3, dy3 = pts[3]
+                                dx4, dy4 = pts[4]
+                                pts[3] = (dx3, dy4)
+                            except Exception:
+                                pass
+                        seg['poly'] = pts
+                except Exception:
+                    pass
+
+    # Now apply D-side edits for D0/D5/D4 per user request:
+    # - do not move D0
+    # - preserve D0->D5 angle, extend D5 down/left along that direction
+    # - extend D4 to left, keep D4.y same as D3.y
+    # - reduce the D5->D4 distance by half
+    for seg in segments:
+        if seg.get('name') == 'D':
+            pts = seg.get('poly', [])
+            if len(pts) > 5:
+                try:
+                    import math
+
+                    x0, y0 = pts[0]
+                    x3, y3 = pts[3]
+                    x4, y4 = pts[4]
+                    x5, y5 = pts[5]
+
+                    # direction from D0 to D5
+                    vx = x5 - x0
+                    vy = y5 - y0
+                    L = math.hypot(vx, vy)
+                    if L > 1e-9:
+                        ux = vx / L
+                        uy = vy / L
+
+                        # extend D5 along same direction by 50%
+                        new_L5 = L * 1.5
+                        new_x5 = x0 + ux * new_L5
+                        new_y5 = y0 + uy * new_L5
+
+                        # provisional move D4 left by a fraction of L
+                        left_offset = L * 0.25
+                        prov_x4 = x4 - left_offset
+                        prov_y4 = y4
+
+                        # vector from new D5 to provisional D4
+                        pvx = prov_x4 - new_x5
+                        pvy = prov_y4 - new_y5
+
+                        # reduce that span by half
+                        final_x4 = new_x5 + pvx * 0.5
+                        final_y4 = new_y5 + pvy * 0.5
+
+                        # enforce D4.y == D3.y
+                        final_x4 = final_x4
+                        final_y4 = y3
+
+                        # commit updates (D0 unchanged)
+                        pts[5] = (new_x5, new_y5)
+                        pts[4] = (final_x4, final_y4)
+                        seg['poly'] = pts
+                except Exception:
+                    pass
+
+    # Align A points to D X coordinates per user request:
+    # Set A1.x = D3.x and A2.x = D2.x (preserve original Y values)
+    d_x0 = d_x2 = d_x3 = d_x4 = d_x5 = None
+    for seg in segments:
+        if seg.get('name') == 'D':
+            dpts = seg.get('poly', [])
+            if len(dpts) > 5:
+                d_x0 = dpts[0][0]
+                d_x2 = dpts[2][0]
+                d_x3 = dpts[3][0]
+                d_x4 = dpts[4][0]
+                d_x5 = dpts[5][0]
+            elif len(dpts) > 3:
+                d_x2 = dpts[2][0]
+                d_x3 = dpts[3][0]
+            break
+
+    if d_x2 is not None and d_x3 is not None:
+        for seg in segments:
+            if seg.get('name') == 'A':
+                apts = seg.get('poly', [])
+                if len(apts) > 2:
+                    ay1 = apts[1][1]
+                    ay2 = apts[2][1]
+                    apts[1] = (d_x3, ay1)
+                    apts[2] = (d_x2, ay2)
+                    # also align A0.x to D4.x and A5.x to D5.x if available
+                    if d_x4 is not None and len(apts) > 0:
+                        apts[0] = (d_x4, apts[0][1])
+                    if d_x5 is not None and len(apts) > 5:
+                        apts[5] = (d_x5, apts[5][1])
+                    seg['poly'] = apts
+                break
+
     prefix = args.outprefix or 'example_output'
     margin = 10
 
