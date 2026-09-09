@@ -60,6 +60,14 @@ PHOTO_DEFAULTS = {
     'render_source': 'photo',
     'd_scale': 1.0,
     'outprefix': 'A',
+    # photo transform parameters (can be overridden via profile)
+    'extend_factor': 1.5,
+    'shift_frac': 0.25,
+    'reduce_frac': 0.5,
+    'move_partway_frac': 0.5,
+    # two-digit options
+    'two_digit': False,
+    'two_digit_gap': 20.0,
 }
  
 
@@ -78,11 +86,20 @@ def _apply_photo_defaults(args, argv):
         ('hort_length', 'hort-length'),
         ('render_source', 'render-source'),
         ('d_scale', 'd-scale'),
+        ('extend_factor', 'extend-factor'),
+        ('shift_frac', 'shift-frac'),
+        ('reduce_frac', 'reduce-frac'),
+        ('move_partway_frac', 'move-partway-frac'),
+        ('two_digit', 'two-digit'),
+        ('two_digit_gap', 'two-digit-gap'),
     ]
     for attr, flag in mapping:
-        # Only apply the photo default when the user didn't pass the
-        # flag on the CLI and the profile did not provide this value.
-        if (not _arg_given(argv, flag)) and (attr not in PROFILE_DEFAULTS):
+        # If the profile provided a value for this attribute and the
+        # user didn't pass the CLI flag, prefer the profile value.
+        if (not _arg_given(argv, flag)) and (attr in PROFILE_DEFAULTS):
+            setattr(args, attr, PROFILE_DEFAULTS[attr])
+        # Otherwise, if no profile and no CLI flag, apply the photo default.
+        elif (not _arg_given(argv, flag)) and (attr not in PROFILE_DEFAULTS):
             setattr(args, attr, PHOTO_DEFAULTS[attr])
 
     # Do NOT unconditionally override profile-specified `outprefix`.
@@ -470,13 +487,13 @@ def main():
                         ux = vx / L
                         uy = vy / L
 
-                        # extend D2 along the same angle by 50% (L -> 1.5L)
-                        new_L = L * 1.5
+                        # extend D2 along the same angle by configured factor
+                        new_L = L * float(getattr(args, 'extend_factor', 1.5))
                         new_x2 = x1 + ux * new_L
                         new_y2 = y1 + uy * new_L
 
                         # move D3 to the right by a small offset proportional to L
-                        right_offset = L * 0.25
+                        right_offset = L * float(getattr(args, 'shift_frac', 0.25))
                         prov_x3 = x3 + right_offset
                         prov_y3 = y3
 
@@ -484,9 +501,9 @@ def main():
                         pvx = prov_x3 - new_x2
                         pvy = prov_y3 - new_y2
 
-                        # reduce that vector length by half
-                        final_x3 = new_x2 + pvx * 0.5
-                        final_y3 = new_y2 + pvy * 0.5
+                        # reduce that vector length by configured fraction
+                        final_x3 = new_x2 + pvx * float(getattr(args, 'reduce_frac', 0.5))
+                        final_y3 = new_y2 + pvy * float(getattr(args, 'reduce_frac', 0.5))
 
                         # write back updated points
                         pts[2] = (new_x2, new_y2)
@@ -528,13 +545,13 @@ def main():
                         ux = vx / L
                         uy = vy / L
 
-                        # extend D5 along same direction by 50%
-                        new_L5 = L * 1.5
+                        # extend D5 along same direction by configured factor
+                        new_L5 = L * float(getattr(args, 'extend_factor', 1.5))
                         new_x5 = x0 + ux * new_L5
                         new_y5 = y0 + uy * new_L5
 
                         # provisional move D4 left by a fraction of L
-                        left_offset = L * 0.25
+                        left_offset = L * float(getattr(args, 'shift_frac', 0.25))
                         prov_x4 = x4 - left_offset
                         prov_y4 = y4
 
@@ -542,9 +559,9 @@ def main():
                         pvx = prov_x4 - new_x5
                         pvy = prov_y4 - new_y5
 
-                        # reduce that span by half
-                        final_x4 = new_x5 + pvx * 0.5
-                        final_y4 = new_y5 + pvy * 0.5
+                        # reduce that span by configured fraction
+                        final_x4 = new_x5 + pvx * float(getattr(args, 'reduce_frac', 0.5))
+                        final_y4 = new_y5 + pvy * float(getattr(args, 'reduce_frac', 0.5))
 
                         # enforce D4.y == D3.y
                         final_x4 = final_x4
@@ -610,9 +627,9 @@ def main():
                     if L < 1e-9:
                         continue
 
-                    # offsets proportional to L
-                    right_offset = L * 0.25
-                    up_offset = L * 0.25
+                    # offsets proportional to L (configurable)
+                    right_offset = L * float(getattr(args, 'shift_frac', 0.25))
+                    up_offset = L * float(getattr(args, 'shift_frac', 0.25))
 
                     # provisional moves: B0 moves up (y - up_offset) and right (+right_offset)
                     prov_x0 = x0 + right_offset
@@ -629,8 +646,8 @@ def main():
                     # shorten that vector by half, keeping B1.x fixed (we move B0 towards B1)
                     final_x1 = prov_x1
                     final_y1 = prov_y1
-                    final_x0 = final_x1 - vx * 0.5
-                    final_y0 = final_y1 - vy * 0.5
+                    final_x0 = final_x1 - vx * float(getattr(args, 'reduce_frac', 0.5))
+                    final_y0 = final_y1 - vy * float(getattr(args, 'reduce_frac', 0.5))
 
                     # commit: keep B5 unchanged
                     bpts[0] = (final_x0, final_y0)
@@ -674,14 +691,14 @@ def main():
                         new_y0 = y5 - r * math.sin(theta)
 
                         # provisional B1: keep x, move up by same up_offset as before
-                        up_offset = math.hypot(x1 - x0, y1 - y0) * 0.25
+                        up_offset = math.hypot(x1 - x0, y1 - y0) * float(getattr(args, 'shift_frac', 0.25))
                         prov_x1 = x1
                         prov_y1 = y1 - up_offset
 
                         # vector from new B0 to provisional B1
                         vx = prov_x1 - new_x0
                         vy = prov_y1 - new_y0
-                        target = 0.5 * math.hypot(vx, vy)
+                        target = float(getattr(args, 'reduce_frac', 0.5)) * math.hypot(vx, vy)
 
                         dx = prov_x1 - new_x0
                         # solve for y such that distance^2 = target^2
@@ -760,8 +777,8 @@ def main():
                             else:
                                 new_x0 = new_x5 + dx
                         else:
-                            # fallback: move halfway in x towards x5
-                            new_x0 = new_x5 + (x0 - new_x5) * 0.5
+                            # fallback: move partway in x towards x5 using configured fraction
+                            new_x0 = new_x5 + (x0 - new_x5) * float(getattr(args, 'move_partway_frac', 0.5))
 
                         # apply changes: keep F1 unchanged, set F0 and F5 as computed
                         fpts[0] = (new_x0, new_y0)
@@ -902,12 +919,30 @@ def main():
 
     points_svgfn = prefix + '_points.svg'
 
+    # Handle optional two-digit duplication: create a shifted copy of
+    # the canonical segments and adjust the working width accordingly.
+    two_digit = bool(getattr(args, 'two_digit', False))
+    two_digit_gap = float(getattr(args, 'two_digit_gap', 20.0))
+    combined_segments = segments
+    W_out = W
+    if two_digit:
+        import copy
+        shift_x = W + two_digit_gap
+        shifted = []
+        for seg in segments:
+            newseg = copy.deepcopy(seg)
+            pts = newseg.get('poly', [])
+            newseg['poly'] = [(x + shift_x, y) for (x, y) in pts]
+            shifted.append(newseg)
+        combined_segments = segments + shifted
+        W_out = W * 2.0 + two_digit_gap
+
     # SVG / WEBP renderings are custom photo-like style.
-    write_photo_svg(svgfn, W, H, segments, margin=margin)
+    write_photo_svg(svgfn, W_out, H, combined_segments, margin=margin)
     print(f"Wrote {svgfn}")
 
     # Also write an annotated SVG that labels each polygon vertex.
-    write_photo_svg_with_points(points_svgfn, W, H, segments, margin=margin)
+    write_photo_svg_with_points(points_svgfn, W_out, H, combined_segments, margin=margin)
     print(f"Wrote {points_svgfn}")
 
     # CNC output uses the same polygons for geometric consistency.
@@ -922,7 +957,12 @@ def main():
         pass_depth = cut_depth / max(1, int(args.cutting_paths))
 
     board_h = float(args.board_height)
-    board_w = float(args.board_width) if (args.board_width is not None) else (W + 2.0 * margin)
+    base_board_w = float(args.board_width) if (args.board_width is not None) else (W + 2.0 * margin)
+    # If two_digit requested, double the board width and add the gap.
+    if two_digit:
+        board_w = base_board_w * 2.0 + float(getattr(args, 'two_digit_gap', 20.0))
+    else:
+        board_w = base_board_w
 
     # If pocket_middle requested and a rough bit was provided, emit
     # separate rough/finish g-code files. Otherwise emit a single g-code.
@@ -930,12 +970,42 @@ def main():
         rough_fn = prefix + '_rough.gcode'
         finish_fn = prefix + '_finish.gcode'
 
+        # Print summary information for rough and finish passes
+        import math
+        print(f"Board size: {board_w:.3f} x {board_h:.3f} mm")
+        print(f"Digit area: {W_out:.3f} x {H:.3f} mm (combined)")
+        print(f"Cut depth: {cut_depth:.3f} mm, per-pass depth: {pass_depth:.3f} mm")
+        # compute finish pass layering
+        if pass_depth > 0:
+            finish_passes = max(1, int(math.ceil(abs(cut_depth) / pass_depth)))
+            finish_step = float(cut_depth) / finish_passes
+        else:
+            finish_passes = 1
+            finish_step = float(cut_depth)
+        # list Z depths for each finish layer (negative values for G-code)
+        finish_depths = [-(min((i + 1) * finish_step, cut_depth)) for i in range(finish_passes)]
+        print(f"Finish passes: {finish_passes}, layer depths (Z): {finish_depths}")
+
+        rough_bit = float(getattr(args, 'rough_bit', 0))
+        rough_step = getattr(args, 'rough_step', None) if getattr(args, 'rough_step', None) is not None else getattr(args, 'pocket_step', None)
+        if rough_step is None and rough_bit and rough_bit > 0:
+            rough_step = rough_bit * 0.9
+        print(f"Rough bit: {rough_bit:.3f} mm, rough pocket step: {str(rough_step)}")
+        # rough passes: either only final rough layer or match finish passes
+        if getattr(args, 'rough_last', False):
+            rough_passes = 1
+            rough_depths = [-(cut_depth)]
+        else:
+            rough_passes = finish_passes
+            rough_depths = list(finish_depths)
+        print(f"Rough passes: {rough_passes}, layer depths (Z): {rough_depths}")
+
         # Rough pass: use rough_bit, rough_step/rough_feed if provided
         write_gcode(
             rough_fn,
-            W,
+            W_out,
             H,
-            segments,
+            combined_segments,
             bit_dia=args.rough_bit,
             cut_depth=cut_depth,
             pass_depth=pass_depth,
@@ -959,9 +1029,9 @@ def main():
         # Finish pass: use main bit and only emit the final finish pass
         write_gcode(
             finish_fn,
-            W,
+            W_out,
             H,
-            segments,
+            combined_segments,
             bit_dia=args.bit,
             cut_depth=cut_depth,
             pass_depth=pass_depth,
@@ -985,9 +1055,9 @@ def main():
     else:
         write_gcode(
             gfn,
-            W,
+            W_out,
             H,
-            segments,
+            combined_segments,
             bit_dia=args.bit,
             cut_depth=cut_depth,
             pass_depth=pass_depth,

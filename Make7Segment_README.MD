@@ -78,3 +78,75 @@ Recommended gitignore
 - `*.svg`, `*.gcode`, `*.webp`, `.venv/`, `__pycache__/`
 
 If you'd like, I can also add a small test harness that runs the script with each profile and produces a short excerpt of the resulting G-code for verification. Say the word and I'll add it.
+
+---
+
+**Make7Alter.py (photo-matched variant)**
+
+A companion script `Make7Alter.py` is included for photo-matched digit output and iterative editing.
+It wraps the canonical geometry and G-code pipeline from `Make7Segment.py` but applies a set of
+photo-oriented defaults and per-segment micro-adjustments so the generated preview and toolpaths
+better match a supplied reference image. Key differences and features:
+
+- Uses `make_segments()` from `Make7Segment.py` for canonical geometry, then applies a set of
+  configurable transform parameters (extend/shift/reduce) that can be overridden in a profile.
+- Produces the same outputs as `Make7Segment.py` (`<prefix>.svg`, `<prefix>_points.svg`,
+  `<prefix>.gcode` or `_rough/_finish.gcode`, and optional `<prefix>.webp`).
+- Adds console summaries before G-code emission showing board size, combined digit area,
+  cut depth, per-pass depth, number of passes, and the Z depth for each pass layer (both
+  rough and finish). This helps verify layering without opening the G-code.
+
+New profile options (example in `Alter_PVC.cfg`)
+
+- `two-digit` (boolean, default: false) — when true, the script generates two digits side-by-side.
+  The second digit is a shifted copy of the first (no mirroring) and is cut after the first digit.
+- `two-digit-gap` (float, default: 20.0) — horizontal gap in mm between the two digits.
+
+When `two-digit=true` the program:
+
+- doubles the effective output width to `W*2 + two-digit-gap` for SVG/WebP previews and for
+  board-dimension calculations.
+- duplicates the segment polygons shifted by `W + two-digit-gap` so the G-code cuts the first
+  digit fully, then continues to cut the second digit (the order of segments is preserved).
+
+Example profile: `Alter_PVC.cfg`
+
+[profile]
+outprefix = A
+width = 50.0
+height = 85.0
+stroke = 6.0
+radius = 10.0
+bit = 2.0
+depth = 10.0
+passdepth = 1.0
+pocket-middle = true
+rough-bit = 3.175
+rough-step = 1.25
+two-digit = true
+two-digit-gap = 20.0
+
+Run (uses profile defaults):
+
+```bash
+python Make7Alter.py --profile Alter_PVC.cfg
+```
+
+Outputs include `A.svg`, `A_points.svg`, `A_rough.gcode`, `A_finish.gcode`, and `A.webp` (if Pillow
+is installed). The console prints a pass-layer summary such as:
+
+```
+Board size: 138.000 x 100.000 mm
+Digit area: 110.000 x 85.000 mm (combined)
+Cut depth: 10.000 mm, per-pass depth: 1.000 mm
+Finish passes: 10, layer depths (Z): [-1.0, -2.0, ..., -10.0]
+Rough bit: 3.175 mm, rough pocket step: 1.25
+Rough passes: 10, layer depths (Z): [-1.0, -2.0, ..., -10.0]
+```
+
+Notes
+- `Make7Alter.py` prefers values from the supplied profile; if a value is missing it falls back to
+  its internal photo defaults. Currently `two-digit` and `two-digit-gap` are profile-driven options
+  (not yet exposed as CLI flags). If you prefer CLI flags, I can add `--two-digit` and
+  `--two-digit-gap` to the argument parser.
+
