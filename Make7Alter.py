@@ -10,6 +10,7 @@ the visual output better matches the provided 7Segment.jpg style.
 
 import os
 import sys
+import configparser
 
 from Make7Segment import (
     PROFILE_DEFAULTS,
@@ -128,8 +129,85 @@ def _preload_profile_defaults(argv):
 
     profile_path = cli_profile or ('profile.cfg' if os.path.exists('profile.cfg') else None)
     PROFILE_DEFAULTS.clear()
-    if profile_path:
+    if not profile_path:
+        return
+
+    # Try to use the canonical loader from Make7Segment; if the profile
+    # contains duplicate options configparser in strict mode will raise
+    # DuplicateOptionError. To avoid modifying Make7Segment.py (preserve
+    # backward compatibility), fall back to a tolerant parse here that
+    # accepts duplicate keys (last-one-wins) and normalizes keys like
+    # load_profile() does.
+    try:
         PROFILE_DEFAULTS.update(load_profile(profile_path))
+        return
+    except Exception as e:
+        # If load_profile raised DuplicateOptionError or similar, attempt
+        # a non-strict parse locally and build a compatible dict.
+        try:
+            cfg = configparser.ConfigParser(strict=False)
+            cfg.read(profile_path)
+            if 'profile' not in cfg:
+                return
+            sec = cfg['profile']
+            out = {}
+            # lightweight type converters mirroring Make7Segment.load_profile
+            type_map = {
+                'height': float,
+                'width': float,
+                'stroke': float,
+                'radius': float,
+                'bit': float,
+                'depth': float,
+                'passdepth': float,
+                'board_thickness': float,
+                'cutting_paths': int,
+                'board_height': float,
+                'board_width': float,
+                'board_outline': str,
+                'outprefix': str,
+                'spindle_speed': int,
+                'feed': float,
+                'plunge': float,
+                'gap': float,
+                'overlap': float,
+                'hgap': float,
+                'vert_length': float,
+                'hort_length': float,
+                'render_source': str,
+                'rough_bit': float,
+                'rough_step': float,
+                'pocket_step': float,
+                'pocket_inset': float,
+                'rough_feed': float,
+            }
+            boolean_keys = set([
+                'show_board_dim', 'debug_centers', 'allow_vertical_overlap', 'pause_after_seg', 'pause_after_layer', 'debug_gcode', 'use_shapely', 'no_shapely', 'rotate', 'pocket_middle', 'rough_last'
+            ])
+
+            for raw_key in sec:
+                key = raw_key.replace('-', '_')
+                raw = sec.get(raw_key)
+                if raw is None:
+                    continue
+                raw = raw.strip()
+                if raw == '':
+                    continue
+                try:
+                    if key in boolean_keys:
+                        val = cfg.getboolean('profile', raw_key)
+                    else:
+                        conv = type_map.get(key, str)
+                        val = conv(raw)
+                except Exception:
+                    val = raw
+                out[key] = val
+
+            PROFILE_DEFAULTS.update(out)
+            return
+        except Exception:
+            # give up silently and leave PROFILE_DEFAULTS empty
+            return
 
 
 def _build_segments(args):
@@ -179,7 +257,7 @@ def write_photo_svg(filename, W, H, segments, margin=10):
         f.write('</svg>\n')
 
 
-def write_photo_webp(filename, W, H, segments, margin=10, scale=8):
+def write_photo_webp(filename, W, H, segments, margin=10, scale=8, bit_dia=None):
     """Render a photo-like WEBP using supersampling for smoother edges."""
     if not _HAS_PIL:
         raise RuntimeError('Pillow not available; install with pip install pillow')
@@ -197,15 +275,247 @@ def write_photo_webp(filename, W, H, segments, margin=10, scale=8):
     img = Image.new('RGB', (hi_w, hi_h), color=bg)
     draw = ImageDraw.Draw(img)
 
+    green = (0, 200, 0)
     for seg in segments:
         pts = seg.get('poly')
         if not pts:
             continue
         poly = [((margin + x) * scale * ss, (margin + y) * scale * ss) for (x, y) in pts]
+
+        # Draw cutter footprint (approx) as a wide green stroke around the polygon
+        try:
+            if bit_dia is not None and float(bit_dia) > 0:
+                stroke_px = float(bit_dia) * scale * ss
+                # use draw.line with closed path to simulate a band
+                int_width = max(1, int(round(stroke_px)))
+                draw.line(poly + [poly[0]], fill=green, width=int_width)
+        except Exception:
+            pass
+
+        # draw the original segment on top so the visual matches real part
         draw.polygon(poly, fill=seg_fill, outline=seg_stroke)
 
     img = img.resize((out_w, out_h), Image.Resampling.LANCZOS)
     img.save(filename, format='WEBP', quality=96, method=6)
+
+
+def write_show_dim_webp(filename, W, H, segments, board_w, board_h, summary_lines, margin=10, scale=8, two_digit=False, per_digit_w=None, two_digit_gap=0.0):
+    """Render a black-and-white line-only WEBP showing board/digit outlines and overlay summary text."""
+    if not _HAS_PIL:
+        raise RuntimeError('Pillow not available; install with pip install pillow')
+    # Reserve extra space to the right for board/digit labels, and space
+    # at the bottom for the summary text so everything fits comfortably.
+    bottom_mm = max(24, len(summary_lines) * 6)
+    extra_right_mm = max(40, 6 * scale)  # mm of extra space to the right
+    canvas_mm_w = (W + 2 * margin + extra_right_mm)
+    canvas_mm_h = (H + 2 * margin + bottom_mm)
+    out_w = int(canvas_mm_w * scale)
+    out_h = int(canvas_mm_h * scale)
+    img = Image.new('RGB', (out_w, out_h), color=(255, 255, 255))
+    draw = ImageDraw.Draw(img)
+
+    # compute centering offsets so the digit/block sits in the page center
+    left_offset_mm = extra_right_mm / 2.0
+    top_offset_mm = bottom_mm / 2.0
+    def _tx(x, y):
+        return ((margin + left_offset_mm + x) * scale, (margin + top_offset_mm + y) * scale)
+
+    # draw digit bounding box
+    dbp = [(0.0, 0.0), (W, 0.0), (W, H), (0.0, H), (0.0, 0.0)]
+    pts = [_tx(x, y) for (x, y) in dbp]
+    draw.line(pts, fill=(0, 0, 0), width=1)
+
+    # draw segment outlines as lines
+    for seg in segments:
+        poly = seg.get('poly')
+        if not poly:
+            continue
+        tx_pts = [_tx(x, y) for (x, y) in poly]
+        if len(tx_pts) > 1:
+            draw.line(tx_pts + [tx_pts[0]], fill=(0, 0, 0), width=1)
+
+    # draw board perimeter if provided
+    try:
+        off_x = -((board_w - W) / 2.0)
+        off_y = -((board_h - H) / 2.0)
+        bp = [(off_x, off_y), (off_x + board_w, off_y), (off_x + board_w, off_y + board_h), (off_x, off_y + board_h), (off_x, off_y)]
+        bpts = [_tx(x, y) for (x, y) in bp]
+        draw.line(bpts, fill=(0, 0, 0), width=1)
+    except Exception:
+        pass
+
+    # helper to format coordinates
+    def _fmt(x, y):
+        try:
+            return f"({x:.3f},{y:.3f})"
+        except Exception:
+            return f"({x},{y})"
+
+    # annotate digit bounding box corners with (X,Y)
+    try:
+        db_corners = [(0.0, 0.0), (W, 0.0), (W, H), (0.0, H)]
+        for (cx, cy) in db_corners:
+            tx, ty = _tx(cx, cy)
+            # small offset so text doesn't overlap corner
+            draw.text((tx + 2, ty + 2), _fmt(cx + 0.0, cy + 0.0), fill=(0, 0, 0))
+    except Exception:
+        pass
+
+    # annotate board perimeter corners with (X,Y)
+    try:
+        for (bx, by) in bp[:4]:
+            tx, ty = _tx(bx, by)
+            draw.text((tx + 2, ty + 2), _fmt(bx, by), fill=(0, 0, 0))
+    except Exception:
+        pass
+
+    # Draw dotted per-digit boxes and annotate their corners
+    try:
+        # derive per-digit width if not explicitly provided
+        pdw = per_digit_w if (per_digit_w is not None) else (W if not two_digit else (W - two_digit_gap) / 2.0)
+        gap = float(two_digit_gap)
+        digit_boxes = []
+        if two_digit:
+            left_box = (0.0, 0.0, pdw, H)
+            right_box = (pdw + gap, 0.0, pdw + gap + pdw, H)
+            digit_boxes = [left_box, right_box]
+        else:
+            digit_boxes = [(0.0, 0.0, pdw, H)]
+
+        def _draw_dashed_rect(box, dash=4, gap_px=4):
+            x0, y0, x1, y1 = box
+            # rectangle as 4 segments
+            segs = [((x0, y0), (x1, y0)), ((x1, y0), (x1, y1)), ((x1, y1), (x0, y1)), ((x0, y1), (x0, y0))]
+            for (ax, ay), (bx_, by_) in segs:
+                # draw dashed line between (ax,ay) and (bx_,by_)
+                ax_px, ay_px = _tx(ax, ay)
+                bx_px, by_px = _tx(bx_, by_)
+                import math
+                dist = math.hypot(bx_px - ax_px, by_px - ay_px)
+                if dist < 1:
+                    continue
+                vx = (bx_px - ax_px) / dist
+                vy = (by_px - ay_px) / dist
+                pos = 0.0
+                dash_len = dash * scale
+                gap_len = gap_px
+                while pos < dist:
+                    seg_end = min(pos + dash_len, dist)
+                    sx = ax_px + vx * pos
+                    sy = ay_px + vy * pos
+                    ex = ax_px + vx * seg_end
+                    ey = ay_px + vy * seg_end
+                    draw.line([(sx, sy), (ex, ey)], fill=(0, 0, 0), width=1)
+                    pos += dash_len + gap_len
+
+        for box in digit_boxes:
+            _draw_dashed_rect(box)
+            # annotate 4 corners
+            x0, y0, x1, y1 = box
+            corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+            for (cx, cy) in corners:
+                tx, ty = _tx(cx, cy)
+                draw.text((tx + 2, ty + 2), _fmt(cx, cy), fill=(0, 0, 0))
+    except Exception:
+        pass
+
+    # compute digit bounding box from segments so we can place the digit-area label
+    try:
+        all_x = []
+        all_y = []
+        for seg in segments:
+            for (x, y) in seg.get('poly', []):
+                all_x.append(x)
+                all_y.append(y)
+        if all_x and all_y:
+            seg_minx = min(all_x)
+            seg_maxx = max(all_x)
+            seg_miny = min(all_y)
+            seg_maxy = max(all_y)
+        else:
+            seg_minx, seg_maxx, seg_miny, seg_maxy = 0.0, W, 0.0, H
+    except Exception:
+        seg_minx, seg_maxx, seg_miny, seg_maxy = 0.0, W, 0.0, H
+
+    # overlay summary text: board size placed inside the board frame, digit area
+    # placed inside board frame near the digits, and remaining lines centered
+    # at the bottom outside the board frame.
+    try:
+        font = None
+        try:
+            from PIL import ImageFont
+            font = ImageFont.load_default()
+        except Exception:
+            font = None
+
+        # Board size: place inside the board perimeter (top-left area)
+        bx, by = _tx(off_x + 6, off_y + 6)
+        draw.text((bx, by), summary_lines[0], fill=(0, 0, 0), font=font)
+
+        # Digit area: place inside the board at top-right, same vertical level
+        if len(summary_lines) > 1:
+            digit_line = summary_lines[1]
+            try:
+                tw, th = font.getsize(digit_line) if font is not None else (len(digit_line) * 6, 10)
+            except Exception:
+                tw = len(digit_line) * 6
+            # right padding 6 mm
+            dx_px, _ = _tx(off_x + board_w - 6, off_y + 6)
+            # place text so its right edge is at dx_px
+            draw.text((dx_px - tw, by), digit_line, fill=(0, 0, 0), font=font)
+
+        # Remaining lines: place them in the extra-right area (outside board frame)
+        # so they don't overlap the board/digit visuals. Append current timestamp.
+        try:
+            from datetime import datetime
+            timestamp = datetime.now().strftime('%Y-%b-%d %I:%M:%S %p')
+        except Exception:
+            timestamp = ''
+
+        rem_lines = summary_lines[2:]
+        # If there are stray/empty lines before the real summary (Cut depth: ...),
+        # detect and drop them so the first displayed line is the Cut depth line.
+        # Prefer the first line that starts with 'Cut depth' as the start.
+        try:
+            start_idx = next(i for i, l in enumerate(rem_lines) if (l or '').strip().startswith('Cut depth'))
+            rem_lines = rem_lines[start_idx:]
+        except StopIteration:
+            # fallback: drop leading empty/whitespace-only lines
+            while rem_lines and (rem_lines[0] or '').strip() == '':
+                rem_lines.pop(0)
+
+        if timestamp:
+            rem_lines = rem_lines + [f"Generated: {timestamp}"]
+
+        line_h = int(12 * scale / 8)
+        # Place the summary block centered horizontally, below the actual board frame
+        # Compute the bottom of the board perimeter (may extend beyond H)
+        try:
+            board_bottom = max(H, off_y + board_h)
+        except Exception:
+            board_bottom = H
+        # Start Y at board-height - 5 mm (move the summary block up by 5 mm)
+        start_y_px = int((margin + top_offset_mm + (board_h - 5.0)) * scale)
+
+        # measure max text width in pixels
+        max_tw = 0
+        for line in rem_lines:
+            try:
+                tw, th = font.getsize(line) if font is not None else (len(line) * 6, 10)
+            except Exception:
+                tw = len(line) * 6
+            if tw > max_tw:
+                max_tw = tw
+
+        center_x_px = int((margin + left_offset_mm + W / 2.0) * scale)
+        left_start = center_x_px - (max_tw // 2)
+
+        for i, line in enumerate(rem_lines):
+            draw.text((left_start, start_y_px + i * line_h), line, fill=(0, 0, 0), font=font)
+    except Exception:
+        pass
+
+    img.save(filename, format='WEBP')
 
 
 def write_photo_svg_with_points(filename, W, H, segments, margin=10):
@@ -273,9 +583,31 @@ def main():
     args = parse_args()
     _apply_photo_defaults(args, argv)
 
-    W = float(args.width)
-    H = float(args.height)
+    # Preserve the original width/height values from args so two-digit
+    # rendering does not mutate or re-calculate the base digit size.
+    orig_width = float(args.width)
+    orig_height = float(args.height)
+    # W/H represent the total digit area as provided by profile/CLI.
+    # For two-digit mode, `orig_width` is the total width for both
+    # digits plus the gap; we must build per-digit geometry to fit
+    # inside that total area.
+    W = orig_width
+    H = orig_height
+
+    # Decide two-digit and per-digit width before generating segments.
+    # Profile `width` is treated as ONE digit width.
+    two_digit = bool(getattr(args, 'two_digit', False))
+    two_digit_gap = float(getattr(args, 'two_digit_gap', 20.0))
+    per_digit_w = orig_width
+
+    # Generate segments using the per-digit width while preserving
+    # `args.width` as the profile/CLI value. Temporarily assign for
+    # _build_segments, then restore.
+    saved_width = getattr(args, 'width', None)
+    args.width = per_digit_w
     segments = _build_segments(args)
+    # restore original
+    args.width = saved_width
 
     # Apply user-specified vertex removals so selected edges become
     # single straight lines. Remove by zero-based point indices as
@@ -921,21 +1253,53 @@ def main():
 
     # Handle optional two-digit duplication: create a shifted copy of
     # the canonical segments and adjust the working width accordingly.
-    two_digit = bool(getattr(args, 'two_digit', False))
-    two_digit_gap = float(getattr(args, 'two_digit_gap', 20.0))
     combined_segments = segments
-    W_out = W
+    # W_out is the rendered/composed width. When two-digit is enabled the
+    # total rendered width is two per-digit widths plus the gap.
     if two_digit:
-        import copy
-        shift_x = W + two_digit_gap
-        shifted = []
+        W_out = per_digit_w * 2.0 + two_digit_gap
+        import copy, math
+        # compute original segments span so we can nudge digits inward
+        all_x = [x for seg in segments for (x, y) in seg.get('poly', [])]
+        if all_x:
+            left_max_x = max(all_x)
+            right_min_x = min(all_x)
+        else:
+            left_max_x = per_digit_w
+            right_min_x = 0.0
+
+        # Target positions: left digit should end at x = per_digit_w
+        # right digit should start at x = per_digit_w + two_digit_gap
+        target_left_end = per_digit_w
+        target_right_start = per_digit_w + two_digit_gap
+
+        t_left = target_left_end - left_max_x
+        t_right = target_right_start - right_min_x
+
+        left_shifted = []
+        right_shifted = []
         for seg in segments:
             newseg = copy.deepcopy(seg)
             pts = newseg.get('poly', [])
-            newseg['poly'] = [(x + shift_x, y) for (x, y) in pts]
-            shifted.append(newseg)
-        combined_segments = segments + shifted
-        W_out = W * 2.0 + two_digit_gap
+            newseg['poly'] = [(x + t_left, y) for (x, y) in pts]
+            left_shifted.append(newseg)
+
+        for seg in segments:
+            newseg = copy.deepcopy(seg)
+            pts = newseg.get('poly', [])
+            newseg['poly'] = [(x + t_right, y) for (x, y) in pts]
+            right_shifted.append(newseg)
+
+        combined_segments = left_shifted + right_shifted
+    else:
+        W_out = per_digit_w
+
+    # Defensive check: ensure the original `args.width` value was not
+    # modified by any two-digit handling. two-digit only affects W_out.
+    try:
+        assert float(args.width) == orig_width
+    except AssertionError:
+        raise AssertionError('args.width changed unexpectedly; two-digit must not modify base width')
 
     # SVG / WEBP renderings are custom photo-like style.
     write_photo_svg(svgfn, W_out, H, combined_segments, margin=margin)
@@ -958,11 +1322,10 @@ def main():
 
     board_h = float(args.board_height)
     base_board_w = float(args.board_width) if (args.board_width is not None) else (W + 2.0 * margin)
-    # If two_digit requested, double the board width and add the gap.
-    if two_digit:
-        board_w = base_board_w * 2.0 + float(getattr(args, 'two_digit_gap', 20.0))
-    else:
-        board_w = base_board_w
+    # Keep physical board width unchanged even when rendering two digits side-by-side.
+    # two_digit only affects rendered/canvas digit layout (`W_out`) but does not
+    # change the final board physical width used for board perimeter and dims.
+    board_w = base_board_w
 
     # If pocket_middle requested and a rough bit was provided, emit
     # separate rough/finish g-code files. Otherwise emit a single g-code.
@@ -984,7 +1347,8 @@ def main():
             finish_step = float(cut_depth)
         # list Z depths for each finish layer (negative values for G-code)
         finish_depths = [-(min((i + 1) * finish_step, cut_depth)) for i in range(finish_passes)]
-        print(f"Finish passes: {finish_passes}, layer depths (Z): {finish_depths}")
+        finish_depths_str = '[' + ', '.join(f"{d:.3f}" for d in finish_depths) + ']'
+        print(f"Finish passes: {finish_passes}, layer depths (Z): {finish_depths_str}")
 
         rough_bit = float(getattr(args, 'rough_bit', 0))
         rough_step = getattr(args, 'rough_step', None) if getattr(args, 'rough_step', None) is not None else getattr(args, 'pocket_step', None)
@@ -998,7 +1362,8 @@ def main():
         else:
             rough_passes = finish_passes
             rough_depths = list(finish_depths)
-        print(f"Rough passes: {rough_passes}, layer depths (Z): {rough_depths}")
+        rough_depths_str = '[' + ', '.join(f"{d:.3f}" for d in rough_depths) + ']'
+        print(f"Rough passes: {rough_passes}, layer depths (Z): {rough_depths_str}")
 
         # Rough pass: use rough_bit, rough_step/rough_feed if provided
         write_gcode(
@@ -1079,7 +1444,59 @@ def main():
         print(f"Wrote {gfn}")
 
     if _HAS_PIL:
-        write_photo_webp(webpfn, W, H, segments, margin=margin, scale=8)
+        # Emit a black-and-white line-only WEBP with dimensional summary for quick inspection.
+        import math
+
+        if pass_depth > 0:
+            finish_passes = max(1, int(math.ceil(abs(cut_depth) / pass_depth)))
+            finish_step = float(cut_depth) / finish_passes
+        else:
+            finish_passes = 1
+            finish_step = float(cut_depth)
+
+        finish_depths = [-(min((i + 1) * finish_step, cut_depth)) for i in range(finish_passes)]
+        finish_depths_str = '[' + ', '.join(f"{d:.3f}" for d in finish_depths) + ']'
+
+        raw_rough_bit = getattr(args, 'rough_bit', None)
+        rough_bit = float(raw_rough_bit) if (raw_rough_bit is not None) else 0.0
+        rough_step = getattr(args, 'rough_step', None) if getattr(args, 'rough_step', None) is not None else getattr(args, 'pocket_step', None)
+        if rough_step is None and rough_bit and rough_bit > 0:
+            rough_step = rough_bit * 0.9
+
+        if raw_rough_bit is None:
+            rough_passes = 0
+            rough_depths = []
+            rough_depths_str = '[]'
+        else:
+            if getattr(args, 'rough_last', False):
+                rough_passes = 1
+                rough_depths = [-(cut_depth)]
+            else:
+                rough_passes = finish_passes
+                rough_depths = list(finish_depths)
+            rough_depths_str = '[' + ', '.join(f"{d:.3f}" for d in rough_depths) + ']'
+
+        rough_bit_str = f"{rough_bit:.3f}" if raw_rough_bit is not None else 'None'
+        rough_step_str = str(rough_step) if (rough_step is not None) else 'None'
+
+        summary_lines = [
+            f"Board size: {board_w:.3f} x {board_h:.3f} mm",
+            f"Digit area: {W_out:.3f} x {H:.3f} mm (combined)",
+            f"Cut depth: {cut_depth:.3f} mm, per-pass depth: {pass_depth:.3f} mm",
+            f"Finish passes: {finish_passes}, layer depths (Z): {finish_depths_str}",
+            f"Rough bit: {rough_bit_str} mm, rough pocket step: {rough_step_str}",
+            f"Rough passes: {rough_passes}, layer depths (Z): {rough_depths_str}",
+        ]
+
+        # Always attempt to write the show-dim WEBP when Pillow is available
+        showfn = prefix + '_show-dim.webp'
+        try:
+            write_show_dim_webp(showfn, W_out, H, combined_segments, board_w, board_h, summary_lines, margin=margin, scale=8, two_digit=two_digit, per_digit_w=per_digit_w, two_digit_gap=two_digit_gap)
+            print(f"Wrote {showfn}")
+        except Exception as e:
+            print(f"Skipped show-dim WEBP: {e}")
+
+        write_photo_webp(webpfn, W_out, H, combined_segments, margin=margin, scale=8, bit_dia=getattr(args, 'bit', None))
         print(f"Wrote {webpfn}")
     else:
         print('Skipped WEBP: Pillow not installed in current Python environment.')
