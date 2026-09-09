@@ -802,50 +802,95 @@ def main():
                         x3, y3 = cpts[3]
                         x4, y4 = cpts[4]
 
-                        # preserve C4
-                        # preserve original C2-C3 length
-                        orig_len = math.hypot(x3 - x2, y3 - y2)
+                        # find B0.x and B0-B1 length
+                        b0x = None
+                        b01_len = None
+                        for s in segments:
+                            if s.get('name') == 'B':
+                                bpts = s.get('poly', [])
+                                if len(bpts) > 1:
+                                    b0x = bpts[0][0]
+                                    bx0, by0 = bpts[0]
+                                    bx1, by1 = bpts[1]
+                                    b01_len = math.hypot(bx1 - bx0, by1 - by0)
+                                break
 
+                        if b0x is None or b01_len is None:
+                            # no B or insufficient points; skip
+                            continue
 
                         # compute unit vector along C4->C3 (preserve this angle)
                         ux = (x3 - x4)
                         uy = (y3 - y4)
                         ul = math.hypot(ux, uy)
                         if ul < 1e-9:
-                            ul = 1.0
-                        ux /= ul
-                        uy /= ul
+                            # degenerate: can't preserve angle; fallback: set x only
+                            new_x3 = b0x
+                            new_y3 = y3
+                        else:
+                            ux /= ul
+                            uy /= ul
+                            # solve for t so that x4 + t*ux == b0x
+                            t = (b0x - x4) / ux
+                            new_x3 = b0x
+                            new_y3 = y4 + t * uy
 
-                        # project vector from C4 to C2 onto this unit vector to get r_proj
-                        vx = x2 - x4
-                        vy = y2 - y4
-                        r_proj = vx * ux + vy * uy
+                        # commit C3 change, then set C2.y so distance C2-C3 == B0-B1
+                        cpts[3] = (new_x3, new_y3)
 
-                        # place C3 at projection distance along the preserved angle
-                        new_x3 = x4 + r_proj * ux
-                        new_y3 = y4 + r_proj * uy
-
-                        # now set target distance is half original
-                        target = orig_len * 0.5
-
-                        # compute horizontal offset between C2.x and new C3.x
+                        # keep C2.x, solve for C2.y where |C2-C3| == b01_len
                         dx = new_x3 - x2
-                        rem = target * target - dx * dx
+                        rem = b01_len * b01_len - dx * dx
                         if rem >= 0:
                             dy = math.sqrt(rem)
-                            # choose new C2.y above C3 (smaller y value)
-                            new_y2 = new_y3 - dy
+                            # choose C2 above C3 if originally above, else below
+                            if y2 < new_y3:
+                                new_y2 = new_y3 - dy
+                            else:
+                                new_y2 = new_y3 + dy
                         else:
-                            # if impossible, fall back to moving C2 partly toward new_y3
-                            new_y2 = y2 + 0.25 * (new_y3 - y2)
+                            # impossible to match exactly; move C2 partway toward C3
+                            new_y2 = y2 + 0.5 * (new_y3 - y2)
 
-                        # write back: keep C4 unchanged
                         cpts[2] = (x2, new_y2)
-                        cpts[3] = (new_x3, new_y3)
-                        # cpts[4] remains (x4,y4)
                         seg['poly'] = cpts
                     except Exception:
                         pass
+                break
+    # --- User-requested E/C/F alignments ---
+    # Move E4.y -> C2.y; Move E3.x -> F0.x; Move E3.y -> C3.y
+    c2y = None
+    c3y = None
+    for seg in segments:
+        if seg.get('name') == 'C':
+            cpts = seg.get('poly', [])
+            if len(cpts) > 3:
+                c2y = cpts[2][1]
+                c3y = cpts[3][1]
+            break
+
+    f0x = None
+    for seg in segments:
+        if seg.get('name') == 'F':
+            fpts = seg.get('poly', [])
+            if len(fpts) > 0:
+                f0x = fpts[0][0]
+            break
+
+    if c2y is not None and c3y is not None:
+        for seg in segments:
+            if seg.get('name') == 'E':
+                epts = seg.get('poly', [])
+                # E3 index 3, E4 index 4 (if present)
+                if len(epts) > 4:
+                    ex3, ey3 = epts[3]
+                    ex4, ey4 = epts[4]
+                    new_ex3 = f0x if (f0x is not None) else ex3
+                    new_ey3 = c3y
+                    new_ey4 = c2y
+                    epts[3] = (new_ex3, new_ey3)
+                    epts[4] = (ex4, new_ey4)
+                    seg['poly'] = epts
                 break
 
     prefix = args.outprefix or 'example_output'
@@ -879,30 +924,89 @@ def main():
     board_h = float(args.board_height)
     board_w = float(args.board_width) if (args.board_width is not None) else (W + 2.0 * margin)
 
-    write_gcode(
-        gfn,
-        W,
-        H,
-        segments,
-        bit_dia=args.bit,
-        cut_depth=cut_depth,
-        pass_depth=pass_depth,
-        feed=args.feed,
-        plunge=args.plunge,
-        show_board=args.show_board_dim,
-        board_w=board_w,
-        board_h=board_h,
-        margin=margin,
-        rotate=args.rotate,
-        spindle_speed=args.spindle_speed,
-        pause_after_segment=args.pause_after_seg,
-        pause_after_layer=args.pause_after_layer,
-        debug_gcode=args.debug_gcode,
-        pocket_middle=args.pocket_middle,
-        pocket_step=args.pocket_step,
-        pocket_inset=args.pocket_inset,
-    )
-    print(f"Wrote {gfn}")
+    # If pocket_middle requested and a rough bit was provided, emit
+    # separate rough/finish g-code files. Otherwise emit a single g-code.
+    if args.pocket_middle and (getattr(args, 'rough_bit', None) is not None):
+        rough_fn = prefix + '_rough.gcode'
+        finish_fn = prefix + '_finish.gcode'
+
+        # Rough pass: use rough_bit, rough_step/rough_feed if provided
+        write_gcode(
+            rough_fn,
+            W,
+            H,
+            segments,
+            bit_dia=args.rough_bit,
+            cut_depth=cut_depth,
+            pass_depth=pass_depth,
+            feed=(args.rough_feed if getattr(args, 'rough_feed', None) is not None else args.feed),
+            plunge=args.plunge,
+            show_board=args.show_board_dim,
+            board_w=board_w,
+            board_h=board_h,
+            margin=margin,
+            rotate=args.rotate,
+            spindle_speed=args.spindle_speed,
+            pause_after_segment=args.pause_after_seg,
+            pause_after_layer=args.pause_after_layer,
+            debug_gcode=args.debug_gcode,
+            pocket_middle=True,
+            pocket_step=(args.rough_step if getattr(args, 'rough_step', None) is not None else args.pocket_step),
+            pocket_inset=args.pocket_inset,
+        )
+        print(f"Wrote {rough_fn}")
+
+        # Finish pass: use main bit and only emit the final finish pass
+        write_gcode(
+            finish_fn,
+            W,
+            H,
+            segments,
+            bit_dia=args.bit,
+            cut_depth=cut_depth,
+            pass_depth=pass_depth,
+            feed=args.feed,
+            plunge=args.plunge,
+            show_board=args.show_board_dim,
+            board_w=board_w,
+            board_h=board_h,
+            margin=margin,
+            rotate=args.rotate,
+            spindle_speed=args.spindle_speed,
+            pause_after_segment=args.pause_after_seg,
+            pause_after_layer=args.pause_after_layer,
+            debug_gcode=args.debug_gcode,
+            pocket_middle=True,
+            pocket_step=args.pocket_step,
+            pocket_inset=args.pocket_inset,
+            finish_only=True,
+        )
+        print(f"Wrote {finish_fn}")
+    else:
+        write_gcode(
+            gfn,
+            W,
+            H,
+            segments,
+            bit_dia=args.bit,
+            cut_depth=cut_depth,
+            pass_depth=pass_depth,
+            feed=args.feed,
+            plunge=args.plunge,
+            show_board=args.show_board_dim,
+            board_w=board_w,
+            board_h=board_h,
+            margin=margin,
+            rotate=args.rotate,
+            spindle_speed=args.spindle_speed,
+            pause_after_segment=args.pause_after_seg,
+            pause_after_layer=args.pause_after_layer,
+            debug_gcode=args.debug_gcode,
+            pocket_middle=args.pocket_middle,
+            pocket_step=args.pocket_step,
+            pocket_inset=args.pocket_inset,
+        )
+        print(f"Wrote {gfn}")
 
     if _HAS_PIL:
         write_photo_webp(webpfn, W, H, segments, margin=margin, scale=8)
