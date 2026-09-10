@@ -69,6 +69,8 @@ PHOTO_DEFAULTS = {
     # two-digit options
     'two_digit': False,
     'two_digit_gap': 20.0,
+    # when True with --show-board-dim, omit board perimeter/dimension in gcode
+    'remove_board_dim': False,
 }
  
 
@@ -93,6 +95,7 @@ def _apply_photo_defaults(args, argv):
         ('move_partway_frac', 'move-partway-frac'),
         ('two_digit', 'two-digit'),
         ('two_digit_gap', 'two-digit-gap'),
+        ('remove_board_dim', 'remove-board-dim'),
     ]
     for attr, flag in mapping:
         # If the profile provided a value for this attribute and the
@@ -182,7 +185,7 @@ def _preload_profile_defaults(argv):
                 'rough_feed': float,
             }
             boolean_keys = set([
-                'show_board_dim', 'debug_centers', 'allow_vertical_overlap', 'pause_after_seg', 'pause_after_layer', 'debug_gcode', 'use_shapely', 'no_shapely', 'rotate', 'pocket_middle', 'rough_last'
+                'show_board_dim', 'remove_board_dim', 'debug_centers', 'allow_vertical_overlap', 'pause_after_seg', 'pause_after_layer', 'debug_gcode', 'use_shapely', 'no_shapely', 'rotate', 'pocket_middle', 'rough_last'
             ])
 
             for raw_key in sec:
@@ -1377,6 +1380,7 @@ def main():
             feed=(args.rough_feed if getattr(args, 'rough_feed', None) is not None else args.feed),
             plunge=args.plunge,
             show_board=args.show_board_dim,
+            remove_board_dim=getattr(args, 'remove_board_dim', False),
             board_w=board_w,
             board_h=board_h,
             margin=margin,
@@ -1403,6 +1407,7 @@ def main():
             feed=args.feed,
             plunge=args.plunge,
             show_board=args.show_board_dim,
+            remove_board_dim=getattr(args, 'remove_board_dim', False),
             board_w=board_w,
             board_h=board_h,
             margin=margin,
@@ -1429,6 +1434,7 @@ def main():
             feed=args.feed,
             plunge=args.plunge,
             show_board=args.show_board_dim,
+            remove_board_dim=getattr(args, 'remove_board_dim', False),
             board_w=board_w,
             board_h=board_h,
             margin=margin,
