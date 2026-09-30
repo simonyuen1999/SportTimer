@@ -15,6 +15,11 @@ opt0 = digitalio.DigitalInOut(board.GP22)     # Pin 29
 opt1 = digitalio.DigitalInOut(board.GP21)     # Pin 27
 # Hardware error: when connect either GP20 or GP21, both turn ON.
 # So swift one pin over tp GP21 & GP22
+# --------------------------------------------
+# 2026-Sep-30: wires cross-talk issue with all these 4 pins.
+# Modify hardware: add a 12K pull-down resistor to each pin, and connect the other end to GND.
+# Tested they work fine now, no code change needed.
+# --------------------------------------------
 opt2 = digitalio.DigitalInOut(board.GP19)     # Pin 25
 opt3 = digitalio.DigitalInOut(board.GP18)     # Pin 24
 
