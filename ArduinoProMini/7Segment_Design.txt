@@ -1,0 +1,65 @@
+7 Segement digit layout:
+
+Each segment is 10 LED.   Segment A is the first, and G is the last segment.
+
+    B    
+C       A
+    G
+D       F
+    E
+
+
+4 Digits layout:
+
+Left                                Right
+10 Min   1 Min    2 dots    10 Sec  1 Sec
+
+In term of contiguous LED line up, the 2 dots are the last.
+
+
+Timer max selection pins: MSB = D3, LSB = D6
+
+D3 D4 D5 D6    Timer Max Minute
+ 0  0  0  0     1
+ 0  0  0  1     2
+ 0  0  1  0     4
+ 0  0  1  1     5
+ 0  1  0  0     7
+ 0  1  0  1     10
+ 0  1  1  0     15
+ 0  1  1  1     20
+ 1  0  0  0     25
+ 1  0  0  1     30
+ 1  0  1  0     35
+ 1  0  1  1     40
+ 1  1  0  0     45
+ 1  1  0  1     50
+ 1  1  1  0     55
+ 1  1  1  1     60
+
+For each of D3..D6 are INPUT_PULLUP
+1. One side of a 2-pin header to the Arduino pin.
+2. The other side to GND.
+3. When the jumper is present (connecting pin -> GND),
+   code reads LOW → interpreted as "1" after modifying readJumpers to invert logic.
+
+Practical checklist to implement
+
+1. For each input (D3,D4,D5,D6,D9,D10,D11,D12) place a 10 kΩ from pin to +5V on your PCB or breadboard.
+    --> 10K from pin to +5V
+
+2. Insert a 470 Ω series resistor between the MCU pin and the header/button (close to the MCU).
+3. Optionally add 10 nF from pin to GND at the MCU.
+4. Keep button wires short and use twisted pairs (signal + ground) if lengths are longer than ~10–20 cm.
+5. Test with DEBUG serial logging on (you already added it) and exercise all buttons/jumpers while moving wires to verify stability.
+6. If you still see noise, increase series resistor up to 1 kΩ or increase cap (0.01→0.1 µF) and retest.
+
+ASCII schematic (single input)
++5V
+|
+10k
+|
++---- MCU_PIN --- 470Ω --- HEADER ---+--- (jumper closed) --- GND
+|
+(open = no connection)
+Optional cap from MCU_PIN to GND: MCU_PIN ---||--- GND (10 nF)

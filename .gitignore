@@ -4,4 +4,6 @@
 *.webp
 .DS_store
 .*.swp
+.vscode
+.vscode/*
 __pycache__/
