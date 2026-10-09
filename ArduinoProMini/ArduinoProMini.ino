@@ -12,7 +12,7 @@
 
 #include <FastLED.h>
 
-#define DEBUG 1
+#define DEBUG 0
 
 #if DEBUG
 // Helper: print time as M:SS with leading zero for seconds
@@ -95,8 +95,8 @@ bool dotBlinkState = false;
 int maxMinutes = 0;   // configurable 0..99
 int currentSeconds = 0; // remaining seconds while running
 int displayMinutes = 0; // value shown in waiting mode (when timer isn't running, this is shown as minutes)
-uint8_t idleBrightness = 20;
-uint8_t runBrightness = 130;
+uint8_t idleBrightness = 10;
+uint8_t runBrightness = 75;
 
 // Button debouncing
 unsigned long lastBtnTimeMinus = 0;
@@ -112,11 +112,23 @@ const unsigned long ALARM_DURATION_MS = 2000;
 // Helper to read jumpers
 int readJumpers() {
   // Pins D3..D6 represent bits MSB..LSB respectively (D3 = bit3, D6 = bit0)
+  int b0 = digitalRead(JUMP_D0); // D3
+  int b1 = digitalRead(JUMP_D1); // D4
+  int b2 = digitalRead(JUMP_D2); // D5
+  int b3 = digitalRead(JUMP_D3); // D6
+
   int v = 0;
-  v |= (digitalRead(JUMP_D0) == HIGH) ? (1<<3) : 0; // D3 -> bit 3 (MSB)
-  v |= (digitalRead(JUMP_D1) == HIGH) ? (1<<2) : 0; // D4 -> bit 2
-  v |= (digitalRead(JUMP_D2) == HIGH) ? (1<<1) : 0; // D5 -> bit 1
-  v |= (digitalRead(JUMP_D3) == HIGH) ? (1<<0) : 0; // D6 -> bit 0 (LSB)
+  v |= (b0 == HIGH) ? (1<<3) : 0; // D3 -> bit 3 (MSB)
+  v |= (b1 == HIGH) ? (1<<2) : 0; // D4 -> bit 2
+  v |= (b2 == HIGH) ? (1<<1) : 0; // D5 -> bit 1
+  v |= (b3 == HIGH) ? (1<<0) : 0; // D6 -> bit 0 (LSB)
+
+  #if DEBUG
+  Serial.print("Jumpers raw (D3..D6): ");
+  Serial.print(b0); Serial.print(","); Serial.print(b1); Serial.print(","); Serial.print(b2); Serial.print(","); Serial.println(b3);
+  Serial.print("Jumpers value (bits MSB..LSB): "); Serial.println(v);
+  #endif
+
   return v;
 }
 
@@ -128,11 +140,6 @@ void setSegmentLEDs(uint8_t digitIndex, uint8_t segmentIndex, CRGB color) {
     uint16_t idx = start + i;
     if (idx < NUM_LEDS) leds[idx] = color;
   }
-}
-
-// Clears all LEDs
-void clearAll() {
-  for (int i=0;i<NUM_LEDS;i++) leds[i] = CRGB::Black;
 }
 
 // Clears all LEDs
@@ -161,15 +168,26 @@ void displayTime(int totalSeconds, CRGB digitColor, bool dotsOn) {
   int minutes = totalSeconds / 60;
   int seconds = totalSeconds % 60;
 
-  int d0 = (minutes / 10) % 10;
-  int d1 = minutes % 10;
-  int d2 = (seconds / 10) % 10;
-  int d3 = seconds % 10;
+  int d0 = (minutes / 10) % 10; // tens minutes
+  int d1 = minutes % 10;        // minutes units
+  int d2 = (seconds / 10) % 10; // tens seconds
+  int d3 = seconds % 10;        // seconds units
 
-  showDigit(0, d0, digitColor);
-  showDigit(1, d1, digitColor);
-  showDigit(2, d2, digitColor);
-  showDigit(3, d3, digitColor);
+  // Physical mapping: segmentStart[0] is the right-most digit (seconds units),
+  // segmentStart[1] is tens-seconds, segmentStart[2] is minutes units,
+  // segmentStart[3] is left-most (tens-minutes).
+  // Suppress leading zero on the left-most tens-minutes digit when minutes < 10.
+  if (minutes < 10) {
+    // blank left-most digit (physical index 3)
+    for (uint8_t s = 0; s < 7; ++s) setSegmentLEDs(3, s, CRGB::Black);
+  } else {
+    showDigit(3, d0, digitColor);
+  }
+
+  // Show minutes units and seconds digits in their physical positions
+  showDigit(2, d1, digitColor); // minutes units -> physical index 2
+  showDigit(1, d2, digitColor); // tens seconds -> physical index 1
+  showDigit(0, d3, digitColor); // seconds units -> physical index 0
 
   setDots(CRGB::Red, dotsOn); // caller may override color by writing again if needed
 }
@@ -203,6 +221,12 @@ void setup() {
   Serial.begin(115200);
   delay(50);
   Serial.println("SportTimer starting");
+  Serial.print("LED_PIN: "); Serial.print(LED_PIN); Serial.print("  NUM_LEDS: "); Serial.print(NUM_LEDS);
+  Serial.print("  SEG_LEDS: "); Serial.print(SEG_LEDS); Serial.print("  DIGIT_LEDS: "); Serial.println(DIGIT_LEDS);
+  Serial.print("RELAY_PIN: "); Serial.println(RELAY_PIN);
+  Serial.print("Button pins (minus,plus,start,reset): ");
+  Serial.print(BTN_MINUS); Serial.print(","); Serial.print(BTN_PLUS); Serial.print(","); Serial.print(BTN_START); Serial.print(","); Serial.println(BTN_RESET);
+  Serial.print("Initial jumper read (value): "); Serial.println(readJumpers());
   #endif
 
   // Build explicit per-segment mapping based on 7Segment_Design.txt
@@ -363,26 +387,37 @@ void loop() {
     #endif
   }
 
-  // Update countdown every 1000ms when running
-  if (running && (now - lastSecondTick >= 1000)) {
-    lastSecondTick += 1000;
-    if (currentSeconds > 0) {
-      currentSeconds--;
-    }
-    #if DEBUG
-    debugPrintTime("Time left: ", currentSeconds);
-    #endif
-    if (currentSeconds <= 0) {
-      // Timer expired
-      currentSeconds = 0;
-      running = false;
+  // Update countdown based on elapsed full seconds
+  if (running) {
+    unsigned long elapsedMs = now - lastSecondTick;
+    if (elapsedMs >= 1000) {
+      unsigned long elapsedSec = elapsedMs / 1000UL;
+      // Advance the reference tick to account for the elapsed seconds
+      lastSecondTick += elapsedSec * 1000UL;
 
-      // Activate relay for ALARM_DURATION_MS
-      digitalWrite(RELAY_PIN, HIGH);
-      alarmOnAt = now;
+      // Subtract elapsed seconds (but don't go negative)
+      if (elapsedSec >= (unsigned long)currentSeconds) {
+        currentSeconds = 0;
+      } else {
+        currentSeconds -= (int)elapsedSec;
+      }
+
       #if DEBUG
-      Serial.println("Timer expired - activating relay");
+      debugPrintTime("Time left: ", currentSeconds);
       #endif
+
+      if (currentSeconds <= 0) {
+        // Timer expired
+        currentSeconds = 0;
+        running = false;
+
+        // Activate relay for ALARM_DURATION_MS
+        digitalWrite(RELAY_PIN, HIGH);
+        alarmOnAt = now;
+        #if DEBUG
+        Serial.println("Timer expired - activating relay");
+        #endif
+      }
     }
   }
 
