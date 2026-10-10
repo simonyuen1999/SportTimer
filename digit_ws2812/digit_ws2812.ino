@@ -34,7 +34,7 @@
 #define BRIGHTNESS  25
 #define LED_TYPE    WS2812
 #define COLOR_ORDER GRB
-struct CRGB leds[NUM_LEDS];
+CRGB leds[NUM_LEDS];
 
 byte dg[11][23] = {
 /*         0  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18 19 20 21 22 */
@@ -60,8 +60,8 @@ const unsigned int COUNT_PER_SECOND = 1000 / LOOP_DELAY_MS; // iterations per se
 const unsigned int DEBOUNCE_MS = 200;                     // debounce interval for touch (ms)
 
 // Seconds blinking during last 20 seconds: 600ms ON, 400ms OFF
-const unsigned int SEC_BLINK_ON_MS = 600;
-const unsigned int SEC_BLINK_OFF_MS = 400;
+const unsigned int SEC_BLINK_ON_MS = 1000;
+const unsigned int SEC_BLINK_OFF_MS = 1000;
 const unsigned long SEC_BLINK_PERIOD = (unsigned long)SEC_BLINK_ON_MS + (unsigned long)SEC_BLINK_OFF_MS;
 
 UINT iMin, iSec, iCount;
@@ -75,6 +75,9 @@ byte lastRawTouch = LOW;
 bool beepActive = false;
 unsigned long beepStartMillis = 0;
 unsigned long beepDurationMs = 0;
+
+// Remember the last second value for which we emitted the short per-second tick
+int lastShortBeepSec = -1;
 
 // Blink state for last-20s (state-machine to avoid aliasing)
 bool secBlinkState = true;                  // true = ON, false = OFF
@@ -99,10 +102,32 @@ touch touch;
 bool bDot = 0;
 UINT dotcounter = 0;
 
+// DOT blink state
+bool dotState = false;                 // true = ON, false = OFF
+unsigned long dotLastToggle = 0;       // last toggle timestamp (ms)
+
+// Idle (0:00) blink state (digits and dots inverse blinking)
+bool idleBlinkState = false;          // true = digits ON / dots OFF; false = digits OFF / dots ON
+unsigned long idleBlinkLastToggle = 0; // last toggle timestamp for idle blink (ms)
+const unsigned long IDLE_BLINK_ON_MS = 1000; // 1 second ON
+const unsigned long IDLE_BLINK_OFF_MS = 500; // 0.5 second OFF
+
 #define DOT_RED    leds[dot1] = CRGB( 255, 0, 0 ); leds[dot2] = CRGB( 255, 0, 0 );
 #define DOT_GREEN  leds[dot1] = CRGB( 0, 255, 0 ); leds[dot2] = CRGB( 0, 255, 0 );
-#define DOT_RESET  leds[dot1] = CRGB( 0, 255, 0 ); leds[dot2] = CRGB( 0, 255, 0 );
+#define DOT_RESET  leds[dot1] = CRGB( 0, 0, 0 ); leds[dot2] = CRGB( 0, 0, 0 );
 
+// Popup state when timer reaches zero: show 0:00 white for a few seconds
+bool zeroPopupActive = false;
+unsigned long zeroPopupStartMillis = 0;
+const unsigned long ZERO_POPUP_MS = 5000; // 5 seconds
+
+// After popup, use the original blue idle mode (digits and dots blue)
+bool idleUseBlueMode = false;
+
+
+
+// Forward declaration so calls before the definition can use the default idleDigitsOn parameter
+void displayTime(UINT m, UINT s, bool secBlinkOn, bool idleDigitsOn = true);
 
 
 void setup() {
@@ -137,20 +162,86 @@ void setup() {
 #endif
 
   displayTime( iMin, iSec, true );
+  // Initialize DOT and idle blink timing
+  dotLastToggle = millis();
+  dotState = false;
+  idleBlinkLastToggle = millis();
+  idleBlinkState = false;
 }
 
 void loop() {
    bool displayUpdated = false;
 
-   /* Independent DOT refreshing */
-   if ( dotcounter++ % 2 == 0 ) {
-     if ( bDot ) {
-        if ( iMin == 0 && iSec > 0 ) { DOT_GREEN } else { DOT_RED }
-        bDot = 0;
+   /* Independent DOT and idle-digit refreshing (millis-based)
+      Modes:
+        - Display idle (0:00): digits blink blue, dots blink white, inverse of digits (500ms on/off)
+        - Timer running (iMin > 0): digits green, dots blink red (500ms on/off)
+        - Final minute (iMin == 0 && iSec > 0): digits red, dots blink green (500ms on/off)
+   */
+   {
+     unsigned long now = millis();
+
+     // Idle (0:00) mode: digits and dots blink inversely
+     if ( iMin == 0 && iSec == 0 ) {
+       unsigned long period = IDLE_BLINK_ON_MS; // both ON and OFF are 500ms
+       if ( now - idleBlinkLastToggle >= (idleBlinkState ? IDLE_BLINK_ON_MS : IDLE_BLINK_OFF_MS) ) {
+         // Toggle idle blink state
+         idleBlinkState = !idleBlinkState;
+         idleBlinkLastToggle = now;
+
+         if ( idleBlinkState ) {
+           // Digits ON (blue), dots ON
+           displayTime( iMin, iSec, true, true );
+           if ( idleUseBlueMode ) {
+             leds[dot1] = CRGB( 0, 0, 100 ); leds[dot2] = CRGB( 0, 0, 100 );
+           } else {
+             // preserve previous yellow choice until popup expires
+             leds[dot1] = CRGB( 100, 100, 0 ); leds[dot2] = CRGB( 100, 100, 0 );
+           }
+         } else {
+           // Digits OFF, dots ON (blue or yellow depending on mode)
+           displayTime( iMin, iSec, true, false );
+           if ( idleUseBlueMode ) {
+             leds[dot1] = CRGB( 0, 0, 100 ); leds[dot2] = CRGB( 0, 0, 100 );
+           } else {
+             leds[dot1] = CRGB( 100, 100, 0 ); leds[dot2] = CRGB( 100, 100, 0 );
+           }
+         }
+         displayUpdated = true;
+       }
      } else {
-        DOT_RESET
-        bDot = 1;    
-     }    
+       // Non-idle modes: normal per-mode dot blinking and digit color handled elsewhere
+       unsigned long periodOn = 500;
+       unsigned long periodOff = 500;
+       bool wantColorRed = true;
+
+       if ( iMin == 0 ) {
+         // final minute: digits red, dots green
+         wantColorRed = false;
+       } else {
+         // timer running (not final minute): digits green, dots red
+         wantColorRed = true;
+       }
+
+       // Toggle dot state based on durations
+       if ( dotState ) {
+         if ( now - dotLastToggle >= periodOn ) {
+           // turn dots OFF
+           DOT_RESET
+           dotState = false;
+           dotLastToggle = now;
+           displayUpdated = true;
+         }
+       } else {
+         if ( now - dotLastToggle >= periodOff ) {
+           // turn dots ON with selected color
+           if ( wantColorRed ) { DOT_RED } else { DOT_GREEN }
+           dotState = true;
+           dotLastToggle = now;
+           displayUpdated = true;
+         }
+       }
+     }
    }
 
    /* Counter for the Timer */
@@ -182,15 +273,33 @@ void loop() {
      
      displayTime( iMin, iSec, true );
      displayUpdated = true;
+
+      // If entering the last-20s window (seconds 1..20), emit a short tick at the start of the second
+      if ( iMin == 0 && iSec > 0 && iSec <= 20 ) {
+        // Ensure the short tick is triggered only once per new second value
+        if ( lastShortBeepSec != (int)iSec ) {
+          // Comment out: no need since the sound from horn is fixed. 
+          // startBeep(200);
+          lastShortBeepSec = iSec;
+        }
+      } else {
+        // Reset when outside last-20s so re-entering re-triggers
+        lastShortBeepSec = -1;
+      }
      
-     if ( iMin == 0 && iSec == 0 ) {
+      if ( iMin == 0 && iSec == 0 ) {
         FastLED.show();
         displayUpdated = false; // avoid duplicate show later in this loop
 #ifdef DBG      
         Serial.println( "The end of timer" );
 #endif
-        /* Trigger the Relay ON / OFF (non-blocking) */
-        startBeep(1500);
+        /* Trigger a single beep when the timer reaches zero */
+        startBeep(1500); // 1.5s beep once at timer end
+
+        /* Enter zero-popup mode: show 0:00 in white for a few seconds */
+        zeroPopupActive = true;
+        zeroPopupStartMillis = millis();
+        // during popup, keep idleUseBlueMode false; it will be enabled after popup expires
 
         /* Reset Counter and MIN & SEC are zero */
         iCount = 0;
@@ -201,9 +310,10 @@ void loop() {
     bool inLast20 = (iMin == 0 && iSec > 0 && iSec <= 20);
     if (inLast20 && !wasInLast20) {
       // Just entered last-20s window: initialize blink state
-      secBlinkState = true;
+      // Start with white phase first so first second shows white, then red
+      secBlinkState = false;
       secBlinkLastToggle = millis();
-      secBlinkCurrentDuration = SEC_BLINK_ON_MS;
+      secBlinkCurrentDuration = SEC_BLINK_OFF_MS;
     }
     if (inLast20) {
       unsigned long now = millis();
@@ -217,6 +327,26 @@ void loop() {
       displayUpdated = true;
     }
     wasInLast20 = inLast20;
+  }
+
+  // Zero-popup handling: display 0:00 in white for ZERO_POPUP_MS, then revert to blue idle mode
+  if ( zeroPopupActive ) {
+    unsigned long now = millis();
+    if ( now - zeroPopupStartMillis < ZERO_POPUP_MS ) {
+      // Show 0:00 in white (1/3 brightness)
+      displayDigit( dig1pos, 0, 85, 85, 85 );
+      displayDigit( dig2pos, 0, 85, 85, 85 );
+      displayDigit( dig3pos, 0, 85, 85, 85 );
+      // dots also white and ON
+      leds[dot1] = CRGB(85,85,85); leds[dot2] = CRGB(85,85,85);
+      displayUpdated = true;
+    } else {
+      // Popup expired: return to original blue idle logic
+      zeroPopupActive = false;
+      idleUseBlueMode = true;
+      idleBlinkLastToggle = millis();
+      idleBlinkState = false;
+    }
   }
 
   // Handle non-blocking beep (turn relay off when duration elapsed)
@@ -236,12 +366,20 @@ void loop() {
   delay(LOOP_DELAY_MS); 
 }
 
-void displayTime( UINT m, UINT s, bool secBlinkOn ) {
-  /* If MIN and SEC are zero, just display '0' */
+void displayTime( UINT m, UINT s, bool secBlinkOn, bool idleDigitsOn = true ) {
+  /* If MIN and SEC are zero, just display '0' or clear it depending on idleDigitsOn */
   if ( m == 0 && s == 0 ) {
-     displayDigit( dig1pos, 0, 0, 255, 0 );
-     displayDigit( dig2pos, 0, 0, 255, 0 );
-     displayDigit( dig3pos, 0, 0, 255, 0 );
+     if ( idleDigitsOn ) {
+       // Show 0:00 in blue (brightness = 100)
+       displayDigit( dig1pos, 0, 0, 0, 100 );
+       displayDigit( dig2pos, 0, 0, 0, 100 );
+       displayDigit( dig3pos, 0, 0, 0, 100 );
+     } else {
+       // Hide digits when idleDigitsOn is false
+       resetDigit( dig1pos );
+       resetDigit( dig2pos );
+       resetDigit( dig3pos );
+     }
      return;
   }
 
@@ -257,13 +395,14 @@ void displayTime( UINT m, UINT s, bool secBlinkOn ) {
      if ( s <= 20 ) {
        // During last 20 seconds, blink the seconds digits based on secBlinkOn
        if ( secBlinkOn ) {
-         displayDigit( dig1pos, s00, 255, 0, 0 );
-         if ( s10 ) { displayDigit( dig2pos, s10, 255, 0, 0 ); } else { resetDigit( dig2pos ); }
-       } else {
-         // blink OFF: hide seconds digits but keep minutes off
-         resetDigit( dig1pos );
-         resetDigit( dig2pos );
-       }
+          // ON phase: red at ~1/3 brightness
+          displayDigit( dig1pos, s00, 85, 0, 0 );
+          if ( s10 ) { displayDigit( dig2pos, s10, 85, 0, 0 ); } else { resetDigit( dig2pos ); }
+        } else {
+          // OFF phase: white at ~1/3 brightness
+          displayDigit( dig1pos, s00, 85, 85, 85 );
+          if ( s10 ) { displayDigit( dig2pos, s10, 85, 85, 85 ); } else { resetDigit( dig2pos ); }
+        }
      } else {
        // Not in blinking window: display seconds normally
        displayDigit( dig1pos, s00, 255, 0, 0 );
