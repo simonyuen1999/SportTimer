@@ -47,8 +47,23 @@ byte dg[11][23] = {
 
 #define MIN  7
  
+// Loop and timing tuning
+const unsigned int LOOP_DELAY_MS = 100;                   // loop delay (ms)
+const unsigned int COUNT_PER_SECOND = 1000 / LOOP_DELAY_MS; // iterations per second
+const unsigned int DEBOUNCE_MS = 200;                     // debounce interval for touch (ms)
+
 UINT iMin, iSec, iCount;
- 
+
+// Debounce state
+unsigned long lastTouchChange = 0;
+byte debouncedTouch = LOW;
+byte lastRawTouch = LOW;
+
+// Non-blocking beep state
+bool beepActive = false;
+unsigned long beepStartMillis = 0;
+unsigned long beepDurationMs = 0;
+
 struct touch { 
    byte wasPressed = LOW; 
    byte isPressed  = LOW; 
@@ -81,6 +96,7 @@ void setup() {
  
   pinMode(BUTTON_PIN, INPUT);
   pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, LOW);
      
   FastLED.addLeds<LED_TYPE, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS).setCorrection( TypicalLEDStrip );
   FastLED.setBrightness( BRIGHTNESS );
@@ -89,6 +105,11 @@ void setup() {
   iMin = 0;
   iSec = 0;
   iCount = 0;
+
+  // Initialize debounce state from current raw reading
+  lastRawTouch = digitalRead(BUTTON_PIN);
+  debouncedTouch = lastRawTouch;
+  lastTouchChange = millis();
 
 #ifdef DBG
   Serial.print( "Min " );
@@ -115,29 +136,39 @@ void loop() {
    /* Counter for the Timer */
    if ( iMin || iSec ) { iCount++; }
 
-   /* Reset the Time to MIN */
-   touch.isPressed = isTouchPressed(BUTTON_PIN);
-   if (touch.wasPressed != touch.isPressed) { 
-      iMin = MIN;  iSec = 0;  iCount = 0;
-   } 
-   touch.wasPressed = touch.isPressed; 
+   /* Reset the Time to MIN (debounced) */
+   {
+     byte raw = isTouchPressed(BUTTON_PIN) ? HIGH : LOW;
+     if ( raw != lastRawTouch ) {
+       lastTouchChange = millis();
+       lastRawTouch = raw;
+     }
+     if ( (millis() - lastTouchChange) > DEBOUNCE_MS ) {
+       if ( debouncedTouch != raw ) {
+         debouncedTouch = raw;
+         // Trigger on pressed (rising edge)
+         if ( debouncedTouch == HIGH ) {
+           iMin = MIN;  iSec = 0;  iCount = 0;
+         }
+       }
+     }
+   }
 
-   /* Every 1/4 second, change Min and Sec */
-   if ( iCount > 0 && iCount % 4 == 0 ) {
+   /* Every 1 second (based on LOOP_DELAY_MS), change Min and Sec */
+   if ( iCount > 0 && (iCount % COUNT_PER_SECOND) == 0 ) {
 
      /* Counting down one second */
      if ( iSec ) {  iSec--;  } else {   iSec = 59;  iMin--; }
      
      displayTime( iMin, iSec );
+     FastLED.show();
      
      if ( iMin == 0 && iSec == 0 ) {
 #ifdef DBG      
         Serial.println( "The end of timer" );
 #endif
-        /* Trigger the Relay ON / OFF */
-        digitalWrite( RELAY_PIN, HIGH );
-        delay( 250 );
-        digitalWrite( RELAY_PIN, LOW );
+        /* Trigger the Relay ON / OFF (non-blocking) */
+        startBeep(250);
 
         /* Reset Counter and MIN & SEC are zero */
         iCount = 0;
@@ -145,8 +176,16 @@ void loop() {
   }
   FastLED.show();
 
-  /* Repeat 1/4 sec */
-  delay(250); 
+  // Handle non-blocking beep (turn relay off when duration elapsed)
+  if (beepActive) {
+    if (millis() - beepStartMillis >= beepDurationMs) {
+      digitalWrite(RELAY_PIN, LOW);
+      beepActive = false;
+    }
+  }
+
+  /* Loop delay (tunable) */
+  delay(LOOP_DELAY_MS); 
 }
 
 void displayTime( UINT m, UINT s ) {
@@ -208,6 +247,14 @@ void displayDigit( UINT offset, UINT d, UINT R, UINT G, UINT B ) {
   for( UINT x = 0; x <= 22; x++ ) {
      leds[offset + x ] = ( dg[ d ][ x ] == 1 ? CRGB( R, G, B) : CRGB( 0, 0, 0) );
   }
+}
+
+// Start a non-blocking beep (relay ON for ms milliseconds)
+void startBeep(unsigned long ms) {
+  digitalWrite(RELAY_PIN, HIGH);
+  beepStartMillis = millis();
+  beepDurationMs = ms;
+  beepActive = true;
 }
 
 bool isTouchPressed(int pin) 
