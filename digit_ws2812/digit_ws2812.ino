@@ -16,6 +16,13 @@
  *        2  1  0
  *           D
  */
+
+ /* 2026-Oct-10:
+  * 1. Change the loop sleep period from 250ms (1/4 second) to 100ms (1/10 second)
+  * 2. Fix the last second display and alarm turn on behavior.
+  * 2. Use non-block method for the beep.
+  * 3. Blink the seconds during the last 20 seconds (600ms ON / 400ms OFF).
+  */
  
 #include <FastLED.h>
 
@@ -52,6 +59,11 @@ const unsigned int LOOP_DELAY_MS = 100;                   // loop delay (ms)
 const unsigned int COUNT_PER_SECOND = 1000 / LOOP_DELAY_MS; // iterations per second
 const unsigned int DEBOUNCE_MS = 200;                     // debounce interval for touch (ms)
 
+// Seconds blinking during last 20 seconds: 600ms ON, 400ms OFF
+const unsigned int SEC_BLINK_ON_MS = 600;
+const unsigned int SEC_BLINK_OFF_MS = 400;
+const unsigned long SEC_BLINK_PERIOD = (unsigned long)SEC_BLINK_ON_MS + (unsigned long)SEC_BLINK_OFF_MS;
+
 UINT iMin, iSec, iCount;
 
 // Debounce state
@@ -63,6 +75,12 @@ byte lastRawTouch = LOW;
 bool beepActive = false;
 unsigned long beepStartMillis = 0;
 unsigned long beepDurationMs = 0;
+
+// Blink state for last-20s (state-machine to avoid aliasing)
+bool secBlinkState = true;                  // true = ON, false = OFF
+unsigned long secBlinkLastToggle = 0;       // last toggle time (ms)
+unsigned long secBlinkCurrentDuration = SEC_BLINK_ON_MS; // current duration (ms)
+bool wasInLast20 = false;                  // track entry into last-20s
 
 struct touch { 
    byte wasPressed = LOW; 
@@ -118,10 +136,12 @@ void setup() {
   Serial.println( iSec );
 #endif
 
-  displayTime( iMin, iSec );
+  displayTime( iMin, iSec, true );
 }
 
 void loop() {
+   bool displayUpdated = false;
+
    /* Independent DOT refreshing */
    if ( dotcounter++ % 2 == 0 ) {
      if ( bDot ) {
@@ -160,21 +180,44 @@ void loop() {
      /* Counting down one second */
      if ( iSec ) {  iSec--;  } else {   iSec = 59;  iMin--; }
      
-     displayTime( iMin, iSec );
-     FastLED.show();
+     displayTime( iMin, iSec, true );
+     displayUpdated = true;
      
      if ( iMin == 0 && iSec == 0 ) {
+        FastLED.show();
+        displayUpdated = false; // avoid duplicate show later in this loop
 #ifdef DBG      
         Serial.println( "The end of timer" );
 #endif
         /* Trigger the Relay ON / OFF (non-blocking) */
-        startBeep(250);
+        startBeep(1500);
 
         /* Reset Counter and MIN & SEC are zero */
         iCount = 0;
-     }
+      }
   }
-  FastLED.show();
+  // If in last 20 seconds, update the seconds blinking every loop (state-machine)
+  {
+    bool inLast20 = (iMin == 0 && iSec > 0 && iSec <= 20);
+    if (inLast20 && !wasInLast20) {
+      // Just entered last-20s window: initialize blink state
+      secBlinkState = true;
+      secBlinkLastToggle = millis();
+      secBlinkCurrentDuration = SEC_BLINK_ON_MS;
+    }
+    if (inLast20) {
+      unsigned long now = millis();
+      if (now - secBlinkLastToggle >= secBlinkCurrentDuration) {
+        secBlinkState = !secBlinkState;
+        // Advance the toggle timestamp to avoid drift
+        secBlinkLastToggle = now;
+        secBlinkCurrentDuration = secBlinkState ? SEC_BLINK_ON_MS : SEC_BLINK_OFF_MS;
+      }
+      displayTime(iMin, iSec, secBlinkState);
+      displayUpdated = true;
+    }
+    wasInLast20 = inLast20;
+  }
 
   // Handle non-blocking beep (turn relay off when duration elapsed)
   if (beepActive) {
@@ -184,11 +227,16 @@ void loop() {
     }
   }
 
+  // Show display once per loop if it was updated
+  if (displayUpdated) {
+    FastLED.show();
+  }
+
   /* Loop delay (tunable) */
   delay(LOOP_DELAY_MS); 
 }
 
-void displayTime( UINT m, UINT s ) {
+void displayTime( UINT m, UINT s, bool secBlinkOn ) {
   /* If MIN and SEC are zero, just display '0' */
   if ( m == 0 && s == 0 ) {
      displayDigit( dig1pos, 0, 0, 255, 0 );
@@ -206,13 +254,20 @@ void displayTime( UINT m, UINT s ) {
   /* Is last min ? */
   if ( m == 0 ) {
      /* display Sec in Red */
-     displayDigit( dig1pos, s00, 255, 0, 0 );
-     
-     if ( s10 ) {
-        displayDigit( dig2pos, s10, 255, 0, 0 );   
+     if ( s <= 20 ) {
+       // During last 20 seconds, blink the seconds digits based on secBlinkOn
+       if ( secBlinkOn ) {
+         displayDigit( dig1pos, s00, 255, 0, 0 );
+         if ( s10 ) { displayDigit( dig2pos, s10, 255, 0, 0 ); } else { resetDigit( dig2pos ); }
+       } else {
+         // blink OFF: hide seconds digits but keep minutes off
+         resetDigit( dig1pos );
+         resetDigit( dig2pos );
+       }
      } else {
-        /* Sec less than 10, do not display 10's SEC */
-        resetDigit( dig2pos );
+       // Not in blinking window: display seconds normally
+       displayDigit( dig1pos, s00, 255, 0, 0 );
+       if ( s10 ) { displayDigit( dig2pos, s10, 255, 0, 0 ); } else { resetDigit( dig2pos ); }
      }
      /* Do not display MIN */
      resetDigit( dig3pos );
@@ -250,7 +305,9 @@ void displayDigit( UINT offset, UINT d, UINT R, UINT G, UINT B ) {
 }
 
 // Start a non-blocking beep (relay ON for ms milliseconds)
+// If a beep is already active, ignore new requests instead of restarting
 void startBeep(unsigned long ms) {
+  if (beepActive) return; // ignore repeated requests while active
   digitalWrite(RELAY_PIN, HIGH);
   beepStartMillis = millis();
   beepDurationMs = ms;
