@@ -12,7 +12,7 @@
 
 #include <FastLED.h>
 
-#define DEBUG 1
+#define DEBUG 0
 
 #if DEBUG
 // Helper: print time as M:SS with leading zero for seconds
@@ -63,27 +63,27 @@ uint16_t dotIndex[2];
 
 // Segment bit mapping (bit 0 = A, bit1 = B, ... bit6 = G)
 const uint8_t SEGMENTS_FOR_DIGIT[10] = {
-  // gfedcba bits, but we'll use bit0->A .. bit6->G
-  // 0
-  (1<<0)|(1<<1)|(1<<2)|(1<<3)|(1<<4)|(1<<5),            // 0: A,B,C,D,E,F
-  // 1
-  (1<<1)|(1<<2),                                         // 1: B,C
-  // 2
-  (1<<0)|(1<<1)|(1<<6)|(1<<4)|(1<<3),                    // 2: A,B,G,E,D
-  // 3
-  (1<<0)|(1<<1)|(1<<6)|(1<<2)|(1<<3),                    // 3: A,B,G,C,D
-  // 4
-  (1<<5)|(1<<6)|(1<<1)|(1<<2),                           // 4: F,G,B,C
-  // 5
-  (1<<0)|(1<<5)|(1<<6)|(1<<2)|(1<<3),                    // 5: A,F,G,C,D
-  // 6
-  (1<<0)|(1<<5)|(1<<4)|(1<<3)|(1<<2)|(1<<6),             // 6: A,F,E,D,C,G
-  // 7
-  (1<<0)|(1<<1)|(1<<2),                                  // 7: A,B,C
-  // 8
-  (1<<0)|(1<<1)|(1<<2)|(1<<3)|(1<<4)|(1<<5)|(1<<6),      // 8: all segments
-  // 9
-  (1<<0)|(1<<1)|(1<<2)|(1<<3)|(1<<5)|(1<<6)              // 9: A,B,C,D,F,G
+  // Using hardware-provided segment definitions (A..G mapped to bits 0..6)
+  // 0: A,B,C,D,E,F
+  (1<<0)|(1<<1)|(1<<2)|(1<<3)|(1<<4)|(1<<5),
+  // 1: A,F
+  (1<<0)|(1<<5),
+  // 2: B,A,G,D,E
+  (1<<0)|(1<<1)|(1<<6)|(1<<3)|(1<<4),
+  // 3: B,A,G,F,E
+  (1<<0)|(1<<1)|(1<<6)|(1<<5)|(1<<4),
+  // 4: C,G,A,F
+  (1<<0)|(1<<2)|(1<<6)|(1<<5),
+  // 5: B,C,G,F,E
+  (1<<1)|(1<<2)|(1<<6)|(1<<5)|(1<<4),
+  // 6: B,C,G,D,F,E
+  (1<<1)|(1<<2)|(1<<6)|(1<<3)|(1<<5)|(1<<4),
+  // 7: B,A,F
+  (1<<0)|(1<<1)|(1<<5),
+  // 8: all segments
+  (1<<0)|(1<<1)|(1<<2)|(1<<3)|(1<<4)|(1<<5)|(1<<6),
+  // 9: B,C,A,G,F,E
+  (1<<0)|(1<<1)|(1<<2)|(1<<6)|(1<<5)|(1<<4)
 };
 
 // States
@@ -91,11 +91,17 @@ volatile bool running = false;
 unsigned long lastSecondTick = 0;
 unsigned long lastBlink = 0;
 bool dotBlinkState = false;
-int maxMinutes = 0;   // configurable 0..99
+// Idle digit blink timing: ON for 1000 ms, OFF for 250 ms
+unsigned long lastDigitToggle = 0;
+bool digitOn = true;
+const unsigned long DIGIT_ON_MS = 1000UL;
+const unsigned long DIGIT_OFF_MS = 250UL;
+int jumperDefaultMinutes = 0; // value read from jumpers at startup
+int maxMinutes = 1;   // configurable 1..99
 int currentSeconds = 0; // remaining seconds while running
-int displayMinutes = 0; // value shown in waiting mode (when timer isn't running, this is shown as minutes)
-uint8_t idleBrightness = 1;
-uint8_t runBrightness = 30;
+int displayMinutes = 1; // value shown in waiting mode (when timer isn't running, this is shown as minutes)
+uint8_t idleBrightness = 5;
+uint8_t runBrightness = 20;
 
 // Button debouncing
 unsigned long lastBtnTimeMinus = 0;
@@ -223,6 +229,35 @@ void displayTime(int totalSeconds, CRGB digitColor, bool dotsOn) {
   setDots(CRGB::Red, dotsOn); // caller may override color by writing again if needed
 }
 
+void displaySecondsOnly(int seconds, CRGB digitColor) {
+  if (seconds < 0) seconds = 0;
+  // tens and units of seconds
+  int s_tens = (seconds / 10) % 10; // 0..5
+  int s_units = seconds % 10;
+  // blank left two digits (physical indices 3 and 2)
+  for (uint8_t seg = 0; seg < 7; ++seg) {
+    setSegmentLEDs(3, seg, CRGB::Black);
+    setSegmentLEDs(2, seg, CRGB::Black);
+  }
+  // show tens-seconds at physical index 1 and units at physical index 0
+  showDigit(1, s_tens, digitColor);
+  showDigit(0, s_units, digitColor);
+}
+
+// Display only the units digit (last second) using physical index 0
+void displaySingleDigit(int seconds, CRGB digitColor) {
+  if (seconds < 0) seconds = 0;
+  int s_units = seconds % 10;
+  // blank digits 3,2,1
+  for (uint8_t seg = 0; seg < 7; ++seg) {
+    setSegmentLEDs(3, seg, CRGB::Black);
+    setSegmentLEDs(2, seg, CRGB::Black);
+    setSegmentLEDs(1, seg, CRGB::Black);
+  }
+  // show only units at physical index 0
+  showDigit(0, s_units, digitColor);
+}
+
 void applyShow(uint8_t brightness) {
   FastLED.setBrightness(brightness);
   FastLED.show();
@@ -282,25 +317,30 @@ void setup() {
   // Read jumpers (active HIGH = present)
   int jumperValue = readJumpers();
   // Use jumperValue as initial max minutes; allow up to at least 15 by 4 jumpers
-  maxMinutes = jumperValue;
-  if (maxMinutes < 0) maxMinutes = 0;
-  if (maxMinutes > 99) maxMinutes = 99;
+  jumperDefaultMinutes = jumperValue;
+  if (jumperDefaultMinutes < 1) jumperDefaultMinutes = 1;
+  if (jumperDefaultMinutes > 99) jumperDefaultMinutes = 99;
+  maxMinutes = jumperDefaultMinutes;
 
+  /*
   #if DEBUG
-  Serial.print("Selected Timer Max (minutes): ");
-  Serial.println(maxMinutes);
+  Serial.print("Jumper default Timer Max (minutes): ");
+  Serial.println(jumperDefaultMinutes);
   #endif
-
-  displayMinutes = 0;
+  */
+  // Initial waiting display shows the current maxMinutes
+  displayMinutes = maxMinutes;
   currentSeconds = 0;
   running = false;
   lastSecondTick = millis();
   lastBlink = millis();
+  lastDigitToggle = millis();
+  digitOn = true;
 
-  // Idle startup display: 0:00 in green, brightness 20, middle dots flash red every 500ms
+  // Idle startup display: 0:00 in blue, brightness idleBrightness, middle dots solid yellow
   clearAll();
-  displayTime(0, CRGB::Green, false);
-  setDots(CRGB::Red, true);
+  displayTime(0, CRGB::Blue, false);
+  setDots(CRGB::Yellow, true);
   applyShow(idleBrightness);
 }
 
@@ -334,7 +374,8 @@ void doMinus() {
     currentSeconds -= 60;
     if (currentSeconds < 0) currentSeconds = 0;
   } else {
-    if (maxMinutes > 0) maxMinutes--;
+    // ensure minimum allowed is 1 minute
+    if (maxMinutes > 1) maxMinutes--;
     displayMinutes = maxMinutes;
   }
 }
@@ -347,9 +388,13 @@ void startTimer() {
 }
 
 void resetTimer() {
+  // Stop timer and restore max minutes to jumper default
   running = false;
   currentSeconds = 0;
-  displayMinutes = 0;
+  maxMinutes = jumperDefaultMinutes;
+  if (maxMinutes < 1) maxMinutes = 1;
+  if (maxMinutes > 99) maxMinutes = 99;
+  displayMinutes = maxMinutes;
   // ensure relay off
   digitalWrite(RELAY_PIN, LOW);
 }
@@ -431,43 +476,41 @@ void loop() {
     #endif
   }
 
-  // Dots blink handling (idle blink every 500ms)
-  if (!running) {
-    if (now - lastBlink >= 500) {
-      lastBlink = now;
-      dotBlinkState = !dotBlinkState;
-    }
-  } else {
-    // when running: In last minute, dots are solid green; otherwise solid red? Requirement:
-    // "During running show digits in green bright 130. In the last min digits change to red bright and the 2 dots change to green."
-    // We'll implement:
-    // - Running and > 60s: digits green, dots solid red
-    // - Running and <= 60s: digits red, dots solid green
-    dotBlinkState = true; // leave them on; color will change depending on time remaining
+  // Dots blink handling (blink at 1Hz i.e., toggle every 500ms)
+  if (now - lastBlink >= 500) {
+    lastBlink = now;
+    dotBlinkState = !dotBlinkState;
   }
 
   // Prepare display based on state
+  // Dots blink handling (idle dots blink at 1Hz via dotBlinkState)
   if (!running) {
-    // Idle/waiting display: show 0:00 in green (but show displayMinutes as minutes), brightness 20, dots blinking red
+    // Idle/waiting display: show maxMinutes (displayMinutes) constantly; dots blink at 1Hz
     clearAll();
     int totalSec = displayMinutes * 60;
-    displayTime(totalSec, CRGB::Green, dotBlinkState);
-    // If dotBlinkState true, dots were set to Red by displayTime. If false, they were set off
+    // Show digits steady in blue
+    displayTime(totalSec, CRGB::Blue, false);
+    // Blink dots in yellow at 1Hz
+    setDots(CRGB::Yellow, dotBlinkState);
     applyShow(idleBrightness);
   } else {
     // Running display
     bool lastMinute = (currentSeconds <= 60);
     clearAll();
     if (!lastMinute) {
-      // digits green, brightness 130, dots red (solid)
-      displayTime(currentSeconds, CRGB::Green, true);
-      // override dots color to red
-      setDots(CRGB::Red, true);
+      // digits green, brightness runBrightness, dots blink red at 1Hz
+      displayTime(currentSeconds, CRGB::Green, dotBlinkState);
+      // override dots color to red as blinked
+      setDots(CRGB::Red, dotBlinkState);
       applyShow(runBrightness);
     } else {
-      // last minute: digits red, dots green, brightness 130
-      displayTime(currentSeconds, CRGB::Red, true);
-      setDots(CRGB::Green, true);
+      // last minute: show seconds only. For the last 9 seconds show only the units digit.
+      if (currentSeconds <= 9) {
+        displaySingleDigit(currentSeconds, CRGB::Red);
+      } else {
+        displaySecondsOnly(currentSeconds, CRGB::Red);
+      }
+      setDots(CRGB::Green, dotBlinkState);
       applyShow(runBrightness);
     }
   }
