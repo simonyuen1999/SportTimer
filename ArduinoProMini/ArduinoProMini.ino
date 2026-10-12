@@ -12,7 +12,7 @@
 
 #include <FastLED.h>
 
-#define DEBUG 0
+#define DEBUG 1
 
 #if DEBUG
 // Helper: print time as M:SS with leading zero for seconds
@@ -28,7 +28,6 @@ void debugPrintTime(const char* prefix, int totalSec) {
 #else
 #define debugPrintTime(prefix, totalSec) ((void)0)
 #endif
-
 
 #define LED_PIN     7   // D7
 #define RELAY_PIN   8   // D8
@@ -95,8 +94,8 @@ bool dotBlinkState = false;
 int maxMinutes = 0;   // configurable 0..99
 int currentSeconds = 0; // remaining seconds while running
 int displayMinutes = 0; // value shown in waiting mode (when timer isn't running, this is shown as minutes)
-uint8_t idleBrightness = 10;
-uint8_t runBrightness = 75;
+uint8_t idleBrightness = 1;
+uint8_t runBrightness = 30;
 
 // Button debouncing
 unsigned long lastBtnTimeMinus = 0;
@@ -110,26 +109,58 @@ unsigned long alarmOnAt = 0;
 const unsigned long ALARM_DURATION_MS = 2000;
 
 // Helper to read jumpers
+/*
+D3 D4 D5 D6    Timer Max Minute (value v interpreted from jumpers)
+ 0  0  0  0     1
+ 0  0  0  1     2
+ 0  0  1  0     4
+ 0  0  1  1     5
+ 0  1  0  0     7
+ 0  1  0  1     10
+ 0  1  1  0     15
+ 0  1  1  1     20
+ 1  0  0  0     25
+ 1  0  0  1     30
+ 1  0  1  0     35
+ 1  0  1  1     40
+ 1  1  0  0     45
+ 1  1  0  1     50
+ 1  1  1  0     55
+ 1  1  1  1     60
+*/
+int timerMaxMinutes[] = { 1, 2, 4, 5, 7, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60 };
+
 int readJumpers() {
   // Pins D3..D6 represent bits MSB..LSB respectively (D3 = bit3, D6 = bit0)
-  int b0 = digitalRead(JUMP_D0); // D3
-  int b1 = digitalRead(JUMP_D1); // D4
-  int b2 = digitalRead(JUMP_D2); // D5
-  int b3 = digitalRead(JUMP_D3); // D6
+  // Hardware: each pin has an external 10K pull-up to VCC and a jumper connects it to GND when inserted.
+  // With INPUT_PULLUP enabled the pin reads HIGH when the jumper is NOT inserted, and LOW when the jumper IS inserted.
+  // We want b0..b3 to be 0 when not inserted and 1 when inserted.
+
+  int raw0 = digitalRead(JUMP_D0); // D3
+  int raw1 = digitalRead(JUMP_D1); // D4
+  int raw2 = digitalRead(JUMP_D2); // D5
+  int raw3 = digitalRead(JUMP_D3); // D6
+
+  int b0 = (raw0 == LOW) ? 1 : 0; // 1 when jumper inserted (pulled to GND)
+  int b1 = (raw1 == LOW) ? 1 : 0;
+  int b2 = (raw2 == LOW) ? 1 : 0;
+  int b3 = (raw3 == LOW) ? 1 : 0;
 
   int v = 0;
-  v |= (b0 == HIGH) ? (1<<3) : 0; // D3 -> bit 3 (MSB)
-  v |= (b1 == HIGH) ? (1<<2) : 0; // D4 -> bit 2
-  v |= (b2 == HIGH) ? (1<<1) : 0; // D5 -> bit 1
-  v |= (b3 == HIGH) ? (1<<0) : 0; // D6 -> bit 0 (LSB)
+  // Map to bits MSB..LSB as in the table: D3->bit3, D4->bit2, D5->bit1, D6->bit0
+  v |= (b0 << 3);
+  v |= (b1 << 2);
+  v |= (b2 << 1);
+  v |= (b3 << 0);
 
+  int maxTime = timerMaxMinutes[v];
+  /*
   #if DEBUG
-  Serial.print("Jumpers raw (D3..D6): ");
-  Serial.print(b0); Serial.print(","); Serial.print(b1); Serial.print(","); Serial.print(b2); Serial.print(","); Serial.println(b3);
-  Serial.print("Jumpers value (bits MSB..LSB): "); Serial.println(v);
+  Serial.print("interpreted D3..D6: "); Serial.print(b0); Serial.print(","); Serial.print(b1); Serial.print(","); Serial.print(b2); Serial.print(","); Serial.println(b3);
+  Serial.print("  maxTime: "); Serial.println(maxTime);
   #endif
-
-  return v;
+  */
+  return maxTime;
 }
 
 // Set a full segment (SEG_LEDS LEDs) for a given digit index (0..3) and segment index (0..6)
@@ -220,13 +251,6 @@ void setup() {
   #if DEBUG
   Serial.begin(115200);
   delay(50);
-  Serial.println("SportTimer starting");
-  Serial.print("LED_PIN: "); Serial.print(LED_PIN); Serial.print("  NUM_LEDS: "); Serial.print(NUM_LEDS);
-  Serial.print("  SEG_LEDS: "); Serial.print(SEG_LEDS); Serial.print("  DIGIT_LEDS: "); Serial.println(DIGIT_LEDS);
-  Serial.print("RELAY_PIN: "); Serial.println(RELAY_PIN);
-  Serial.print("Button pins (minus,plus,start,reset): ");
-  Serial.print(BTN_MINUS); Serial.print(","); Serial.print(BTN_PLUS); Serial.print(","); Serial.print(BTN_START); Serial.print(","); Serial.println(BTN_RESET);
-  Serial.print("Initial jumper read (value): "); Serial.println(readJumpers());
   #endif
 
   // Build explicit per-segment mapping based on 7Segment_Design.txt
@@ -341,29 +365,12 @@ void loop() {
 
   // Buttons handling
   if (readButtonDebounced(BTN_PLUS, lastBtnTimePlus)) {
-    #if DEBUG
-    Serial.println("Button + pressed");
-    #endif
     doPlus();
-    #if DEBUG
-    if (running) debugPrintTime("Remaining after +: ", currentSeconds);
-    else Serial.print("Max minutes after +: "), Serial.println(maxMinutes);
-    #endif
   }
   if (readButtonDebounced(BTN_MINUS, lastBtnTimeMinus)) {
-    #if DEBUG
-    Serial.println("Button - pressed");
-    #endif
     doMinus();
-    #if DEBUG
-    if (running) debugPrintTime("Remaining after -: ", currentSeconds);
-    else Serial.print("Max minutes after -: "), Serial.println(maxMinutes);
-    #endif
   }
   if (readButtonDebounced(BTN_START, lastBtnTimeStart)) {
-    #if DEBUG
-    Serial.println("Button Start pressed");
-    #endif
     if (!running) {
       startTimer();
       #if DEBUG
@@ -378,13 +385,7 @@ void loop() {
     }
   }
   if (readButtonDebounced(BTN_RESET, lastBtnTimeReset)) {
-    #if DEBUG
-    Serial.println("Button Reset pressed");
-    #endif
     resetTimer();
-    #if DEBUG
-    Serial.println("Timer reset to 0:00");
-    #endif
   }
 
   // Update countdown based on elapsed full seconds
