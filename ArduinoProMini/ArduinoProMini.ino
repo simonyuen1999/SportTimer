@@ -108,11 +108,21 @@ unsigned long lastBtnTimeMinus = 0;
 unsigned long lastBtnTimePlus = 0;
 unsigned long lastBtnTimeStart = 0;
 unsigned long lastBtnTimeReset = 0;
+// One-shot reported flags: true while a press has been reported; reset on release
+bool lastBtnReportedMinus = false;
+bool lastBtnReportedPlus = false;
+bool lastBtnReportedStart = false;
+bool lastBtnReportedReset = false;
 const unsigned long DEBOUNCE_MS = 50;
 
 // Relay alarm control
-unsigned long alarmOnAt = 0;
-const unsigned long ALARM_DURATION_MS = 2000;
+unsigned long activeBeepEnd = 0; // millis timestamp when active beep should end (0 = inactive)
+const unsigned long ALARM_DURATION_MS = 1000;
+
+// Expired-display control: when timer hits 0, show 0:00 in white for EXPIRED_DISPLAY_MS milliseconds
+bool inExpiredDisplay = false;
+unsigned long expiredDisplayEnd = 0;
+const unsigned long EXPIRED_DISPLAY_MS = 5000UL; // 5 seconds
 
 // Helper to read jumpers
 /*
@@ -263,6 +273,13 @@ void applyShow(uint8_t brightness) {
   FastLED.show();
 }
 
+// Non-blocking beep: activate relay for `ms` milliseconds then turn it off automatically
+void activeBeep(unsigned long ms) {
+  digitalWrite(RELAY_PIN, HIGH);
+  // set an absolute millis deadline for ending the beep
+  activeBeepEnd = millis() + ms;
+}
+
 void setupPins() {
   pinMode(JUMP_D0, INPUT_PULLUP);
   pinMode(JUMP_D1, INPUT_PULLUP);
@@ -344,14 +361,24 @@ void setup() {
   applyShow(idleBrightness);
 }
 
-bool readButtonDebounced(uint8_t pin, unsigned long &lastTimeRef) {
+// Read a button and report a single press event per physical press (requires release to re-arm).
+// pin: button pin (INPUT_PULLUP, pressed==LOW)
+// lastTimeRef: per-button timestamp used for debounce
+// reportedFlag: per-button flag that is true while the current press has been reported and remains true until button release
+bool readButtonPressed(uint8_t pin, unsigned long &lastTimeRef, bool &reportedFlag) {
   bool pressed = (digitalRead(pin) == LOW);
   unsigned long now = millis();
   if (pressed) {
-    if (now - lastTimeRef > DEBOUNCE_MS) {
+    // Button is currently pressed. If it hasn't been reported yet and debounce elapsed, report it once.
+    if (!reportedFlag && (now - lastTimeRef > DEBOUNCE_MS)) {
+      reportedFlag = true;
       lastTimeRef = now;
       return true;
     }
+  } else {
+    // Button released: clear the reported flag and update the timestamp so the next press is debounced
+    reportedFlag = false;
+    lastTimeRef = now;
   }
   return false;
 }
@@ -409,27 +436,17 @@ void loop() {
   unsigned long now = millis();
 
   // Buttons handling
-  if (readButtonDebounced(BTN_PLUS, lastBtnTimePlus)) {
+  if (readButtonPressed(BTN_PLUS, lastBtnTimePlus, lastBtnReportedPlus)) {
     doPlus();
   }
-  if (readButtonDebounced(BTN_MINUS, lastBtnTimeMinus)) {
+  if (readButtonPressed(BTN_MINUS, lastBtnTimeMinus, lastBtnReportedMinus)) {
     doMinus();
   }
-  if (readButtonDebounced(BTN_START, lastBtnTimeStart)) {
-    if (!running) {
-      startTimer();
-      #if DEBUG
-      debugPrintTime("Timer started: ", currentSeconds);
-      #endif
-    } else {
-      // If already running, treat as pause? The user didn't request pause; ignore or restart.
-      // Here we'll ignore repeated starts when running.
-      #if DEBUG
-      Serial.println("Start pressed while running - ignored");
-      #endif
-    }
+  if (readButtonPressed(BTN_START, lastBtnTimeStart, lastBtnReportedStart)) {
+    // Start or restart the timer from the currently selected maxMinutes
+    startTimer();
   }
-  if (readButtonDebounced(BTN_RESET, lastBtnTimeReset)) {
+  if (readButtonPressed(BTN_RESET, lastBtnTimeReset, lastBtnReportedReset)) {
     resetTimer();
   }
 
@@ -448,32 +465,25 @@ void loop() {
         currentSeconds -= (int)elapsedSec;
       }
 
-      #if DEBUG
-      debugPrintTime("Time left: ", currentSeconds);
-      #endif
-
       if (currentSeconds <= 0) {
         // Timer expired
         currentSeconds = 0;
         running = false;
 
-        // Activate relay for ALARM_DURATION_MS
-        digitalWrite(RELAY_PIN, HIGH);
-        alarmOnAt = now;
-        #if DEBUG
-        Serial.println("Timer expired - activating relay");
-        #endif
+        // Activate relay for ALARM_DURATION_MS using non-blocking activeBeep
+        activeBeep(ALARM_DURATION_MS);
+
+        // Enter expired-display state: show 0:00 in white for EXPIRED_DISPLAY_MS
+        inExpiredDisplay = true;
+        expiredDisplayEnd = now + EXPIRED_DISPLAY_MS;
       }
     }
   }
 
-  // Turn off relay after alarm duration
-  if (alarmOnAt != 0 && (now - alarmOnAt >= ALARM_DURATION_MS)) {
+  // Turn off relay when activeBeep deadline reached
+  if (activeBeepEnd != 0 && now >= activeBeepEnd) {
     digitalWrite(RELAY_PIN, LOW);
-    alarmOnAt = 0;
-    #if DEBUG
-    Serial.println("Alarm off (relay deactivated)");
-    #endif
+    activeBeepEnd = 0;
   }
 
   // Dots blink handling (blink at 1Hz i.e., toggle every 500ms)
@@ -484,7 +494,26 @@ void loop() {
 
   // Prepare display based on state
   // Dots blink handling (idle dots blink at 1Hz via dotBlinkState)
-  if (!running) {
+  if (inExpiredDisplay) {
+    // Show 0:00 in white for the configured period
+    clearAll();
+    // Show 0:00 in white and show the middle dots in white as well
+    displayTime(0, CRGB::White, true);
+    setDots(CRGB::White, true);
+    // Use half of runBrightness for the expired display
+    applyShow(runBrightness / 2);
+
+    // When expired-display period finishes, return to waiting mode and reload jumper default
+    if (now >= expiredDisplayEnd) {
+      inExpiredDisplay = false;
+      // Re-read jumpers to restore default
+      jumperDefaultMinutes = readJumpers();
+      if (jumperDefaultMinutes < 1) jumperDefaultMinutes = 1;
+      if (jumperDefaultMinutes > 99) jumperDefaultMinutes = 99;
+      maxMinutes = jumperDefaultMinutes;
+      displayMinutes = maxMinutes;
+    }
+  } else if (!running) {
     // Idle/waiting display: show maxMinutes (displayMinutes) constantly; dots blink at 1Hz
     clearAll();
     int totalSec = displayMinutes * 60;
