@@ -1,5 +1,13 @@
+// -------------------------------------------------------
+// Author: Simon Yuen (simonyuen1999@hotmail.com)
+// Date:   2026-Oct-10
+// AI:     Use VSC IDE (on Windows) -> GitHub (Copilot) -> use GPT-5 mini (Context window: Medium - 264K)
+// Copyright: Free to use and modify.  You are welcomed to use my name as reference.
+// -------------------------------------------------------
+
+// -------------------------------------------------------
 // SixInch Sport Timer - Arduino Pro Mini
-// Using FastLED for WS2812B control
+// Using FastLED for WS2812B control (282 LED)
 
 // Pin mapping (adjust if needed):
 // D3..D6 : jumper binary input (MSB = D3, LSB = D6)
@@ -12,6 +20,7 @@
 
 #include <FastLED.h>
 
+// Note: After the initial development, I removed the most DEBUG statements.
 #define DEBUG 0
 
 #if DEBUG
@@ -101,7 +110,7 @@ int maxMinutes = 1;   // configurable 1..99
 int currentSeconds = 0; // remaining seconds while running
 int displayMinutes = 1; // value shown in waiting mode (when timer isn't running, this is shown as minutes)
 uint8_t idleBrightness = 5;
-uint8_t runBrightness = 20;
+uint8_t runBrightness = 15;
 
 // Button debouncing
 unsigned long lastBtnTimeMinus = 0;

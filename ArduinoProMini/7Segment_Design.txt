@@ -1,6 +1,6 @@
 7 Segement digit layout:
 
-Each segment is 10 LED.   Segment A is the first, and G is the last segment.
+Each segment has 10 LED.   Segment A is the first, and G is the last segment.
 
     B    
 C       A
@@ -11,13 +11,16 @@ D       F
 
 4 Digits layout:
 
-Left                                Right
-10 Min   1 Min    2 dots    10 Sec  1 Sec
+Left                                  Right
+10x Min   1 Min    2 dots    10x Sec  1 Sec
 
-In term of contiguous LED line up, the 2 dots are the last.
+Total is 280 + 2 = 282 LED
 
+In term of contiguous LED line up (index), these 2 dots are the last two LED.
 
-Timer max selection pins: MSB = D3, LSB = D6
+---------------------------------------------
+
+Timer max (maxMinutes) selection pins: MSB = D3, LSB = D6
 
 D3 D4 D5 D6    Timer Max Minute
  0  0  0  0     1
@@ -37,7 +40,7 @@ D3 D4 D5 D6    Timer Max Minute
  1  1  1  0     55
  1  1  1  1     60
 
-For each of D3..D6 are INPUT_PULLUP
+For each of D3..D6 are INPUT_PULLUP (added a 10k resistor to Vcc to ensure INPUT_PULLUP)
 1. One side of a 2-pin header to the Arduino pin.
 2. The other side to GND.
 3. When the jumper is present (connecting pin -> GND),
@@ -48,18 +51,64 @@ Practical checklist to implement
 1. For each input (D3,D4,D5,D6,D9,D10,D11,D12) place a 10 kΩ from pin to +5V on your PCB or breadboard.
     --> 10K from pin to +5V
 
-2. Insert a 470 Ω series resistor between the MCU pin and the header/button (close to the MCU).
-3. Optionally add 10 nF from pin to GND at the MCU.
-4. Keep button wires short and use twisted pairs (signal + ground) if lengths are longer than ~10–20 cm.
+2. Insert a 470 Ω series resistor between the MCU pin and the header/button (close to the MCU).  ** Non implement
+3. Optionally add 10 nF from pin to GND at the MCU.  ** Non implement
+4. Keep button wires short and use twisted pairs (signal + ground) if lengths are longer than ~10–20 cm.  ** Yes
 5. Test with DEBUG serial logging on (you already added it) and exercise all buttons/jumpers while moving wires to verify stability.
 6. If you still see noise, increase series resistor up to 1 kΩ or increase cap (0.01→0.1 µF) and retest.
 
-ASCII schematic (single input)
+Best Practice: ASCII schematic (single input)
 +5V
 |
 10k
 |
-+---- MCU_PIN --- 470Ω --- HEADER ---+--- (jumper closed) --- GND
++---- MCU_PIN --- 470Ω --- HEADER ---+--- (jumper closed or push switch) --- GND
 |
 (open = no connection)
 Optional cap from MCU_PIN to GND: MCU_PIN ---||--- GND (10 nF)
+
+---------------------------
+Color scheme:
+
+1. Blue color digit when waiting for user to start
+2. Green color digit during Timer count down
+3. Red color digit (seconds) in the last minutes
+4. When Timer expired, display 0:00 in white color for 3 seconds then back to waiting state.
+
+Power consumsion since it has 282 LED:
+
+1. In the waiting state, brightness = 5 which is good enough for user to see it in blue.
+2. During count down, brightness = 15.  So far it is good for users to see the digits.
+
+Sound (Horn):
+
+Since it is bicycle beep (horn), it only horn once even the relay turn on for longer time.
+So, as long as the relay turn on / off for more than half second, the horn will sound once.
+
+---------------------------
+
+The circuit:
+
+1. Arduino Pro Mini
+  1.1 Use two 18650 battery (3.7V) = 7.4 volt
+  1.2 Use Step down the voltage to 5.0 volt
+  1.3 The 5 volt is connected to Arduino Vin and ws2812b Vcc
+  1.4 A 200 uF and 0.01 uf Caps are added to the 5 volt power line. 
+2. Use (Lirary: FastLED) WS2812B control (282 LED)
+
+Pin mapping:
+
+3. D3..D6 : jumper binary input (MSB = D3, LSB = D6)
+  3.1 Jumper insert means HIGH
+
+4. D7     : WS2812B data (to 282 LED)
+5. D8     : Relay output (active HIGH for horn 1.5 - 2s)
+
+6. D9     : Button -1 min
+7. D10    : Button +1 min
+8. D11    : Button Start  (added in parallel: a bigger button for easy to start)
+9. D12    : Button Reset
+
+All D3 .. D6 and D9 .. D12 have a 10k resistor to PULL_UP to Vcc (+5v).
+
+----------------------
