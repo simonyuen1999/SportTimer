@@ -19,6 +19,12 @@
 // D12    : Button Reset
 
 #include <FastLED.h>
+#include <math.h>
+
+#include "build_version.h"  // auto-updated by upload_with_increment.ps1
+// Expose the build version as a 16-bit constant in the firmware
+const uint16_t BUILD_VERSION_VAR = BUILD_VERSION;
+
 
 // Note: After the initial development, I removed the most DEBUG statements.
 #define DEBUG 0
@@ -71,11 +77,11 @@ uint16_t segmentStart[4][7];
 uint16_t dotIndex[2];
 
 // Segment bit mapping (bit 0 = A, bit1 = B, ... bit6 = G)
-const uint8_t SEGMENTS_FOR_DIGIT[10] = {
-  // Using hardware-provided segment definitions (A..G mapped to bits 0..6)
+// Extended table to include hex digits A-F (values 10..15). Keep indices 0..9 for decimal digits.
+const uint8_t SEGMENTS_FOR_DIGIT[16] = {
   // 0: A,B,C,D,E,F
   (1<<0)|(1<<1)|(1<<2)|(1<<3)|(1<<4)|(1<<5),
-  // 1: A,F
+  // 1: A,F  (hardware-specific mapping preserved)
   (1<<0)|(1<<5),
   // 2: B,A,G,D,E
   (1<<0)|(1<<1)|(1<<6)|(1<<3)|(1<<4),
@@ -92,7 +98,19 @@ const uint8_t SEGMENTS_FOR_DIGIT[10] = {
   // 8: all segments
   (1<<0)|(1<<1)|(1<<2)|(1<<3)|(1<<4)|(1<<5)|(1<<6),
   // 9: B,C,A,G,F,E
-  (1<<0)|(1<<1)|(1<<2)|(1<<6)|(1<<5)|(1<<4)
+  (1<<0)|(1<<1)|(1<<2)|(1<<6)|(1<<5)|(1<<4),
+  // A (10): A,B,C,E,F,G
+  (1<<0)|(1<<1)|(1<<2)|(1<<4)|(1<<5)|(1<<6),
+  // b (11): F,E,D,C,G (lowercase b)
+  (1<<5)|(1<<4)|(1<<3)|(1<<2)|(1<<6),
+  // C (12): A,F,E,D
+  (1<<0)|(1<<5)|(1<<4)|(1<<3),
+  // d (13): B,C,D,E,G (lowercase d)
+  (1<<1)|(1<<2)|(1<<3)|(1<<4)|(1<<6),
+  // E (14): A,F,G,E,D
+  (1<<0)|(1<<5)|(1<<6)|(1<<4)|(1<<3),
+  // F (15): A,F,G,E
+  (1<<0)|(1<<5)|(1<<6)|(1<<4)
 };
 
 // States
@@ -111,6 +129,17 @@ int currentSeconds = 0; // remaining seconds while running
 int displayMinutes = 1; // value shown in waiting mode (when timer isn't running, this is shown as minutes)
 uint8_t idleBrightness = 20;
 uint8_t runBrightness = 25;
+
+// Version display colors (Brown, Cyan, Gold, Red, Green, Blue )
+const uint8_t VERSION_COLOR_COUNT = 6;
+const CRGB VERSION_COLORS[VERSION_COLOR_COUNT] = {
+  CRGB(165,42,42),   // Brown
+  CRGB(0,255,255),   // Cyan
+  CRGB(255,215,0),   // Gold
+  CRGB(255,0,0),   // Red
+  CRGB(0,255,0),   // Green
+  CRGB(0,0,255)   // Blue
+};
 
 // Button debouncing
 unsigned long lastBtnTimeMinus = 0;
@@ -261,6 +290,21 @@ void displaySecondsOnly(int seconds, CRGB digitColor) {
   // show tens-seconds at physical index 1 and units at physical index 0
   showDigit(1, s_tens, digitColor);
   showDigit(0, s_units, digitColor);
+}
+
+// Display a 16-bit value in uppercase hexadecimal across the 4 physical digits
+// Physical indices: 3 = MS nibble (leftmost), 2 = next, 1 = next, 0 = LSN (rightmost)
+void displayHexVersion(uint16_t value, CRGB color) {
+  uint8_t n3 = (value >> 12) & 0xF;
+  uint8_t n2 = (value >> 8) & 0xF;
+  uint8_t n1 = (value >> 4) & 0xF;
+  uint8_t n0 = value & 0xF;
+
+  // Draw each hex nibble using the extended SEGMENTS_FOR_DIGIT table
+  showDigit(3, n3, color);
+  showDigit(2, n2, color);
+  showDigit(1, n1, color);
+  showDigit(0, n0, color);
 }
 
 // Display only the units digit (last second) using physical index 0
@@ -457,6 +501,46 @@ void loop() {
   }
   if (readButtonPressed(BTN_RESET, lastBtnTimeReset, lastBtnReportedReset)) {
     resetTimer();
+  }
+
+  // If START and RESET are pressed together, display the 16-bit BUILD_VERSION_VAR in HEX
+  // Latch the display for at least 2 seconds even if the buttons are released briefly.
+  // Dots must be off while displaying the version. The color cycles through the
+  // VERSION_COLORS list, changing every 750 ms. Brightness for each color ramps
+  // from 1/3*runBrightness up to runBrightness and back to 1/3*runBrightness.
+  if (digitalRead(BTN_START) == LOW && digitalRead(BTN_RESET) == LOW) {
+    // Debounce the simultaneous press briefly
+    delay(20);
+    unsigned long verStart = millis();
+    const unsigned long minDisplayMs = 10000UL; // latch duration (10 seconds)
+    const unsigned long colorMs = 1000UL;      // per-color duration
+
+    // Continue displaying while both buttons are held OR until minDisplayMs has elapsed
+    while ((digitalRead(BTN_START) == LOW && digitalRead(BTN_RESET) == LOW) || (millis() - verStart < minDisplayMs)) {
+      unsigned long elapsed = millis() - verStart;
+      uint8_t colorIdx = (elapsed / colorMs) % VERSION_COLOR_COUNT;
+      unsigned long colorElapsed = elapsed % colorMs;
+
+      // t in [0,1) across colorMs; envelope is triangle 0->1->0 over the interval
+      float t = (float)colorElapsed / (float)colorMs;
+      float envelope = 1.0f - fabsf(2.0f * t - 1.0f); // 0..1
+      float base = 1.0f / 3.0f;
+      float brightnessFactor = base + envelope * (1.0f - base); // base -> 1 -> base
+      int brightness = (int)(runBrightness * brightnessFactor + 0.5f);
+      if (brightness < 1) brightness = 1;
+
+      clearAll();
+      displayHexVersion(BUILD_VERSION_VAR, VERSION_COLORS[colorIdx]);
+      // Ensure dots are off
+      setDots(CRGB::Black, false);
+      applyShow((uint8_t)brightness);
+
+      // Poll frequently for responsiveness
+      delay(50);
+    }
+
+    // Small post-display debounce
+    delay(50);
   }
 
   // Update countdown based on elapsed full seconds
