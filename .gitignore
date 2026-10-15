@@ -8,4 +8,18 @@
 .vscode/*
 __pycache__/
 libArchive/*
-stubArchive/*
+stubArchive/*# Ignore Arduino/arduino-cli build artifacts
+/ArduinoProMini/build/
+/ArduinoProMini/build
+/ArduinoProMini/build/**
+build/
+*.hex
+*.elf
+*.bin
+*.eep
+*.o
+*.a
+compile_commands.json
+includes.cache
+libraries.cache
+build.options.json

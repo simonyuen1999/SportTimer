@@ -109,8 +109,8 @@ int jumperDefaultMinutes = 0; // value read from jumpers at startup
 int maxMinutes = 1;   // configurable 1..99
 int currentSeconds = 0; // remaining seconds while running
 int displayMinutes = 1; // value shown in waiting mode (when timer isn't running, this is shown as minutes)
-uint8_t idleBrightness = 5;
-uint8_t runBrightness = 15;
+uint8_t idleBrightness = 20;
+uint8_t runBrightness = 25;
 
 // Button debouncing
 unsigned long lastBtnTimeMinus = 0;
@@ -126,7 +126,7 @@ const unsigned long DEBOUNCE_MS = 50;
 
 // Relay alarm control
 unsigned long activeBeepEnd = 0; // millis timestamp when active beep should end (0 = inactive)
-const unsigned long ALARM_DURATION_MS = 1000;
+const unsigned long ALARM_DURATION_MS = 2000;
 
 // Expired-display control: when timer hits 0, show 0:00 in white for EXPIRED_DISPLAY_MS milliseconds
 bool inExpiredDisplay = false;
