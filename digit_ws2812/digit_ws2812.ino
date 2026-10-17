@@ -106,11 +106,17 @@ UINT dotcounter = 0;
 bool dotState = false;                 // true = ON, false = OFF
 unsigned long dotLastToggle = 0;       // last toggle timestamp (ms)
 
-// Idle (0:00) blink state (digits and dots inverse blinking)
-bool idleBlinkState = false;          // true = digits ON / dots OFF; false = digits OFF / dots ON
+// Idle (0:00) blink state (digits inverse blinking)
+bool idleBlinkState = false;          // true = digits ON; false = digits OFF
 unsigned long idleBlinkLastToggle = 0; // last toggle timestamp for idle blink (ms)
 const unsigned long IDLE_BLINK_ON_MS = 1000; // 1 second ON
 const unsigned long IDLE_BLINK_OFF_MS = 500; // 0.5 second OFF
+
+// Idle dot blink (double rate compared to digits)
+bool idleDotState = false;            // true = dots ON, false = dots OFF
+unsigned long idleDotLastToggle = 0;  // last toggle time for idle dots (ms)
+const unsigned long IDLE_DOT_BLINK_ON_MS = max(1U, IDLE_BLINK_ON_MS / 4);  // 4x rate
+const unsigned long IDLE_DOT_BLINK_OFF_MS = max(1U, IDLE_BLINK_OFF_MS / 4); // 4x rate
 
 #define DOT_RED    leds[dot1] = CRGB( 255, 0, 0 ); leds[dot2] = CRGB( 255, 0, 0 );
 #define DOT_GREEN  leds[dot1] = CRGB( 0, 255, 0 ); leds[dot2] = CRGB( 0, 255, 0 );
@@ -167,6 +173,9 @@ void setup() {
   dotState = false;
   idleBlinkLastToggle = millis();
   idleBlinkState = false;
+  // Initialize idle dots
+  idleDotLastToggle = millis();
+  idleDotState = false;
 }
 
 void loop() {
@@ -184,32 +193,35 @@ void loop() {
      // Idle (0:00) mode: digits and dots blink inversely
      if ( iMin == 0 && iSec == 0 ) {
        unsigned long period = IDLE_BLINK_ON_MS; // both ON and OFF are 500ms
-       if ( now - idleBlinkLastToggle >= (idleBlinkState ? IDLE_BLINK_ON_MS : IDLE_BLINK_OFF_MS) ) {
-         // Toggle idle blink state
-         idleBlinkState = !idleBlinkState;
-         idleBlinkLastToggle = now;
 
-         if ( idleBlinkState ) {
-           // Digits ON (blue), dots ON
-           displayTime( iMin, iSec, true, true );
-           if ( idleUseBlueMode ) {
-             leds[dot1] = CRGB( 0, 0, 100 ); leds[dot2] = CRGB( 0, 0, 100 );
-           } else {
-             // preserve previous yellow choice until popup expires
-             leds[dot1] = CRGB( 100, 100, 0 ); leds[dot2] = CRGB( 100, 100, 0 );
-           }
-         } else {
-           // Digits OFF, dots ON (blue or yellow depending on mode)
-           displayTime( iMin, iSec, true, false );
-           if ( idleUseBlueMode ) {
-             leds[dot1] = CRGB( 0, 0, 100 ); leds[dot2] = CRGB( 0, 0, 100 );
-           } else {
-             leds[dot1] = CRGB( 100, 100, 0 ); leds[dot2] = CRGB( 100, 100, 0 );
-           }
-         }
-         displayUpdated = true;
-       }
-     } else {
+        // Digit blink: toggle at the configured idle digit rate
+        if ( now - idleBlinkLastToggle >= (idleBlinkState ? IDLE_BLINK_ON_MS : IDLE_BLINK_OFF_MS) ) {
+          // Toggle idle blink state for digits
+          idleBlinkState = !idleBlinkState;
+          idleBlinkLastToggle = now;
+
+          if ( idleBlinkState ) {
+            // Digits ON (white)
+            displayTime( iMin, iSec, true, true );
+          } else {
+            // Digits OFF
+            displayTime( iMin, iSec, true, false );
+          }
+          displayUpdated = true;
+        }
+
+        // Idle dots blink independently at a faster rate
+        if ( now - idleDotLastToggle >= (idleDotState ? IDLE_DOT_BLINK_ON_MS : IDLE_DOT_BLINK_OFF_MS) ) {
+          idleDotState = !idleDotState;
+          idleDotLastToggle = now;
+          displayUpdated = true;
+        }
+
+        // Ensure dots reflect current idleDotState
+        if ( idleDotState ) { leds[dot1] = CRGB( 100, 0, 0 ); leds[dot2] = CRGB( 100, 0, 0 ); }
+        else { leds[dot1] = CRGB( 0, 0, 0 ); leds[dot2] = CRGB( 0, 0, 0 ); }
+
+      } else {
        // Non-idle modes: normal per-mode dot blinking and digit color handled elsewhere
        unsigned long periodOn = 500;
        unsigned long periodOff = 500;
@@ -370,10 +382,10 @@ void displayTime( UINT m, UINT s, bool secBlinkOn, bool idleDigitsOn = true ) {
   /* If MIN and SEC are zero, just display '0' or clear it depending on idleDigitsOn */
   if ( m == 0 && s == 0 ) {
      if ( idleDigitsOn ) {
-       // Show 0:00 in blue (brightness = 100)
-       displayDigit( dig1pos, 0, 0, 0, 100 );
-       displayDigit( dig2pos, 0, 0, 0, 100 );
-       displayDigit( dig3pos, 0, 0, 0, 100 );
+       // Show 0:00 in white (brightness components = 100)
+       displayDigit( dig1pos, 0, 100, 100, 100 );
+       displayDigit( dig2pos, 0, 100, 100, 100 );
+       displayDigit( dig3pos, 0, 100, 100, 100 );
      } else {
        // Hide digits when idleDigitsOn is false
        resetDigit( dig1pos );
