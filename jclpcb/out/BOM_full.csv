@@ -1,0 +1,4 @@
+Line,Qty,Designator,Comment,Footprint,LCSC Part #,Assembly
+1,24,"B3,B2,B1,C3,C2,C1,D4,D3,D2,D1,E3,E2,E1,F3,F2,F1,A1,A2,A3,A4,G4,G3,G2,G1",WS2812B,LED5050_WS2812B,C2761795,SMT - placed by fab
+2,1,C10,470uF 10V,CAP_SMD_8x10.5,C3039784,DNP - customer installs on BACK
+3,2,"J1,J2",1x3 2.54mm,PinHeader_1x03_P2.54,,DNP - wires soldered from BACK

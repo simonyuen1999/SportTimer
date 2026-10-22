@@ -1,0 +1,21 @@
+# Ignore generated previews and CNC output
+*.svg
+*.gcode
+*.webp
+.DS_store
+.*.swp
+.vscode
+.vscode/*
+*.zip
+__pycache__/
+libArchive/*
+*.hex
+*.elf
+*.bin
+*.eep
+*.o
+*.a
+compile_commands.json
+includes.cache
+libraries.cache
+build.options.json
